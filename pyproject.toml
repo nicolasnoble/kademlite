@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=77.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kademlite"
+version = "0.1.0"
+description = "Lightweight asyncio-native pure-Python Kademlia DHT implementation"
+authors = [{name = "Nicolas Noble", email = "nicolas@nobis-crew.org"}]
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "AUTHORS"]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "cryptography",
+    "protobuf>=5.27.0",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking",
+]
+
+[project.urls]
+Homepage = "https://github.com/nicolasnoble/kademlite"
+Repository = "https://github.com/nicolasnoble/kademlite"
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["kademlite*"]
+exclude = ["tests*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = ["kademlite/proto/*_pb2.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
