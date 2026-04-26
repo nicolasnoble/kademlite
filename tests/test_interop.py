@@ -44,12 +44,16 @@ from kademlite.kademlia import KADEMLIA_PROTOCOL, kad_get_value, kad_put_value
 
 log = logging.getLogger(__name__)
 
-RUST_NODE_BIN = os.path.join(
-    os.path.dirname(__file__), "libp2p_kad_interop",
-    "rust_node", "target", "release", "kad-interop-test",
-)
-
-RUST_AVAILABLE = os.path.exists(RUST_NODE_BIN)
+BINARIES = {
+    "rust": os.path.join(
+        os.path.dirname(__file__), "libp2p_kad_interop",
+        "rust_node", "target", "release", "kad-interop-test",
+    ),
+    "go": os.path.join(
+        os.path.dirname(__file__), "libp2p_kad_interop",
+        "go_node", "kad-interop-test-go",
+    ),
+}
 
 
 def node_multiaddr(node: DhtNode) -> str:
@@ -59,17 +63,19 @@ def node_multiaddr(node: DhtNode) -> str:
     return f"/ip4/{host}/tcp/{port}/p2p/{peer_id_b58}"
 
 
-class RustNode:
-    """Manages a Rust libp2p test node subprocess."""
+class InteropNode:
+    """Manages an interop test node subprocess (Rust or Go)."""
 
     def __init__(
         self,
+        binary_path: str,
         mode: str,
         key: str,
         value: str,
         peer: str | None = None,
         timeout_secs: int = 30,
     ):
+        self.binary_path = binary_path
         self.mode = mode
         self.key = key
         self.value = value
@@ -85,7 +91,7 @@ class RustNode:
         env["RUST_LOG"] = "info"
 
         cmd = [
-            RUST_NODE_BIN,
+            self.binary_path,
             "--mode", self.mode,
             "--timeout-secs", str(self.timeout_secs),
             "--key", self.key,
@@ -116,10 +122,10 @@ class RustNode:
                     self.full_addr = addr.replace("0.0.0.0", "127.0.0.1")
                     return
         self.stop()
-        raise RuntimeError("Rust node didn't print LISTEN_ADDR")
+        raise RuntimeError("Interop node didn't print LISTEN_ADDR")
 
     async def wait_for_exit(self, timeout: float = 15.0) -> tuple[str, str]:
-        """Wait for the Rust process to exit without blocking the event loop."""
+        """Wait for the process to exit without blocking the event loop."""
         def _wait():
             try:
                 self.proc.wait(timeout=timeout)
@@ -155,14 +161,13 @@ class RustNode:
         self.stop()
 
 
-@pytest.fixture
-def rust_available():
-    """Skip test if Rust binary isn't built."""
-    if not RUST_AVAILABLE:
-        pytest.skip(
-            "Rust interop binary not found. Build with: "
-            "cd tests/libp2p_kad_interop/rust_node && cargo build --release"
-        )
+@pytest.fixture(params=["rust", "go"])
+def interop_binary(request):
+    """Yields (lang, binary_path) for each available implementation; skips if not built."""
+    binary = BINARIES[request.param]
+    if not os.path.exists(binary):
+        pytest.skip(f"{request.param} interop binary not built: {binary}")
+    return (request.param, binary)
 
 
 # ---------------------------------------------------------------------------
@@ -171,17 +176,18 @@ def rust_available():
 
 
 @pytest.mark.asyncio
-async def test_rust_put_python_dht_get(rust_available):
-    """Rust node stores a record; Python DhtNode retrieves it via iterative GET."""
-    test_key = "/test/interop/rust-put-py-get"
-    test_value = json.dumps({"rank": 0, "source": "rust", "test": "dht_get"})
+async def test_node_put_python_dht_get(interop_binary):
+    """Interop node stores a record; Python DhtNode retrieves it via iterative GET."""
+    lang, binary_path = interop_binary
+    test_key = "/test/interop/node-put-py-get"
+    test_value = json.dumps({"rank": 0, "source": lang, "test": "dht_get"})
 
-    with RustNode("put", test_key, test_value) as rust:
+    with InteropNode(binary_path, "put", test_key, test_value) as remote:
         await asyncio.sleep(0.3)
 
         node = DhtNode()
         try:
-            await node.start("127.0.0.1", 0, bootstrap_peers=[rust.full_addr])
+            await node.start("127.0.0.1", 0, bootstrap_peers=[remote.full_addr])
             await asyncio.sleep(0.5)
 
             result = await asyncio.wait_for(
@@ -197,9 +203,10 @@ async def test_rust_put_python_dht_get(rust_available):
 
 
 @pytest.mark.asyncio
-async def test_python_dht_put_rust_get(rust_available):
-    """Python DhtNode stores a record; Rust node dials Python and retrieves it."""
-    test_key = "/test/interop/py-put-rust-get"
+async def test_python_dht_put_node_get(interop_binary):
+    """Python DhtNode stores a record; interop node dials Python and retrieves it."""
+    lang, binary_path = interop_binary
+    test_key = "/test/interop/py-put-node-get"
     test_value = json.dumps({"rank": 1, "source": "python", "test": "dht_put"})
 
     node = DhtNode()
@@ -210,15 +217,17 @@ async def test_python_dht_put_rust_get(rust_available):
 
         py_addr = node_multiaddr(node)
 
-        with RustNode("get", test_key, "", peer=py_addr, timeout_secs=15) as rust:
-            stdout, stderr = await rust.wait_for_exit(timeout=15)
-            output = rust.parse_output(stdout)
+        with InteropNode(
+            binary_path, "get", test_key, "", peer=py_addr, timeout_secs=15
+        ) as remote:
+            stdout, stderr = await remote.wait_for_exit(timeout=15)
+            output = remote.parse_output(stdout)
 
             assert output.get("RESULT") == "OK", (
-                f"Rust node failed: result={output.get('RESULT')}\n"
+                f"Interop node ({lang}) failed: result={output.get('RESULT')}\n"
                 f"stdout: {stdout}\nstderr: {stderr[-500:]}"
             )
-            assert "RECORD_VALUE" in output, "Rust node didn't report RECORD_VALUE"
+            assert "RECORD_VALUE" in output, "Interop node didn't report RECORD_VALUE"
 
             actual = json.loads(output["RECORD_VALUE"])
             expected = json.loads(test_value)
@@ -228,11 +237,12 @@ async def test_python_dht_put_rust_get(rust_available):
 
 
 @pytest.mark.asyncio
-async def test_rust_dials_python(rust_available):
-    """Rust initiates connection to Python. Validates Noise responder + Yamux
+async def test_node_dials_python(interop_binary):
+    """Interop node initiates connection to Python. Validates Noise responder + Yamux
     responder + inbound Kademlia handler on the Python side."""
-    test_key = "/test/interop/rust-dials-python"
-    test_value = json.dumps({"direction": "rust-to-python"})
+    lang, binary_path = interop_binary
+    test_key = "/test/interop/node-dials-python"
+    test_value = json.dumps({"direction": f"{lang}-to-python"})
 
     node = DhtNode()
     try:
@@ -243,12 +253,14 @@ async def test_rust_dials_python(rust_available):
 
         py_addr = node_multiaddr(node)
 
-        with RustNode("get", test_key, "", peer=py_addr, timeout_secs=15) as rust:
-            stdout, stderr = await rust.wait_for_exit(timeout=15)
-            output = rust.parse_output(stdout)
+        with InteropNode(
+            binary_path, "get", test_key, "", peer=py_addr, timeout_secs=15
+        ) as remote:
+            stdout, stderr = await remote.wait_for_exit(timeout=15)
+            output = remote.parse_output(stdout)
 
             assert output.get("RESULT") == "OK", (
-                f"Rust->Python dial failed: {output.get('RESULT')}\n"
+                f"{lang}->Python dial failed: {output.get('RESULT')}\n"
                 f"stderr: {stderr[-500:]}"
             )
             actual = json.loads(output["RECORD_VALUE"])
@@ -259,22 +271,23 @@ async def test_rust_dials_python(rust_available):
 
 
 @pytest.mark.asyncio
-async def test_multihop_python_rust_python(rust_available):
-    """Three-node topology: Python A stores, Rust B is intermediary,
-    Python C retrieves. Validates that closer_peers responses from Rust
-    correctly route Python's iterative lookup."""
+async def test_multihop_python_node_python(interop_binary):
+    """Three-node topology: Python A stores, interop B is intermediary,
+    Python C retrieves. Validates that closer_peers responses from the interop
+    node correctly route Python's iterative lookup."""
+    lang, binary_path = interop_binary
     test_key = "/test/interop/multihop"
-    test_value = json.dumps({"path": "A->B->C"})
+    test_value = json.dumps({"path": "A->B->C", "via": lang})
 
-    with RustNode("put", "/test/dummy", "dummy", timeout_secs=30) as rust:
+    with InteropNode(binary_path, "put", "/test/dummy", "dummy", timeout_secs=30) as remote:
         await asyncio.sleep(0.3)
 
         node_a = DhtNode()
-        await node_a.start("127.0.0.1", 0, bootstrap_peers=[rust.full_addr])
+        await node_a.start("127.0.0.1", 0, bootstrap_peers=[remote.full_addr])
         await asyncio.sleep(0.5)
 
         node_c = DhtNode()
-        await node_c.start("127.0.0.1", 0, bootstrap_peers=[rust.full_addr])
+        await node_c.start("127.0.0.1", 0, bootstrap_peers=[remote.full_addr])
         await asyncio.sleep(0.5)
 
         try:
@@ -294,8 +307,9 @@ async def test_multihop_python_rust_python(rust_available):
 
 
 @pytest.mark.asyncio
-async def test_large_record_interop(rust_available):
+async def test_large_record_interop(interop_binary):
     """Test a record near the maximum size round-trips correctly."""
+    lang, binary_path = interop_binary
     test_key = "/test/interop/large-record"
     tensor_layout = [
         {
@@ -308,12 +322,12 @@ async def test_large_record_interop(rust_available):
     test_value = json.dumps({"rank": 0, "tensor_layout": tensor_layout})
     assert len(test_value) > 8000, f"Test value too small: {len(test_value)} bytes"
 
-    with RustNode("put", test_key, test_value) as rust:
+    with InteropNode(binary_path, "put", test_key, test_value) as remote:
         await asyncio.sleep(0.3)
 
         node = DhtNode()
         try:
-            await node.start("127.0.0.1", 0, bootstrap_peers=[rust.full_addr])
+            await node.start("127.0.0.1", 0, bootstrap_peers=[remote.full_addr])
             await asyncio.sleep(0.5)
 
             result = await asyncio.wait_for(
@@ -330,14 +344,15 @@ async def test_large_record_interop(rust_available):
 
 
 @pytest.mark.asyncio
-async def test_bulk_records_interop(rust_available):
-    """Store multiple records on Rust, retrieve all from Python DhtNode."""
-    with RustNode("put", "/test/seed", "seed", timeout_secs=30) as rust:
+async def test_bulk_records_interop(interop_binary):
+    """Store multiple records on the interop node, retrieve all from Python DhtNode."""
+    lang, binary_path = interop_binary
+    with InteropNode(binary_path, "put", "/test/seed", "seed", timeout_secs=30) as remote:
         await asyncio.sleep(0.3)
 
         node = DhtNode()
         try:
-            await node.start("127.0.0.1", 0, bootstrap_peers=[rust.full_addr])
+            await node.start("127.0.0.1", 0, bootstrap_peers=[remote.full_addr])
             await asyncio.sleep(0.5)
 
             records = {}
@@ -359,16 +374,19 @@ async def test_bulk_records_interop(rust_available):
 
 
 @pytest.mark.asyncio
-async def test_record_overwrite_interop(rust_available):
+async def test_record_overwrite_interop(interop_binary):
     """Overwrite a record and verify the latest value is returned."""
+    lang, binary_path = interop_binary
     test_key = "/test/interop/overwrite"
 
-    with RustNode("put", test_key, '{"version": 1}', timeout_secs=30) as rust:
+    with InteropNode(
+        binary_path, "put", test_key, '{"version": 1}', timeout_secs=30
+    ) as remote:
         await asyncio.sleep(0.3)
 
         node = DhtNode()
         try:
-            await node.start("127.0.0.1", 0, bootstrap_peers=[rust.full_addr])
+            await node.start("127.0.0.1", 0, bootstrap_peers=[remote.full_addr])
             await asyncio.sleep(0.5)
 
             result = await asyncio.wait_for(
@@ -393,9 +411,10 @@ async def test_record_overwrite_interop(rust_available):
 
 
 @pytest.mark.asyncio
-async def test_mixed_cluster(rust_available):
-    """Two Python DhtNodes + one Rust node forming a mixed DHT cluster.
+async def test_mixed_cluster(interop_binary):
+    """Two Python DhtNodes + one interop node forming a mixed DHT cluster.
     Records stored on any node should be retrievable from any other."""
+    lang, binary_path = interop_binary
     py_a = DhtNode()
     py_b = DhtNode()
 
@@ -403,7 +422,10 @@ async def test_mixed_cluster(rust_available):
         await py_a.start("127.0.0.1", 0)
         addr_a = node_multiaddr(py_a)
 
-        with RustNode("put", "/test/from-rust", '{"origin": "rust"}', timeout_secs=30):
+        with InteropNode(
+            binary_path, "put", "/test/from-node",
+            json.dumps({"origin": lang}), timeout_secs=30,
+        ):
             await asyncio.sleep(1.0)
 
             await py_b.start("127.0.0.1", 0, bootstrap_peers=[addr_a])
@@ -413,7 +435,7 @@ async def test_mixed_cluster(rust_available):
             await py_b.put(b"/test/from-py-b", b'{"origin": "python-b"}')
 
             await asyncio.wait_for(
-                py_b.get(b"/test/from-rust"), timeout=10.0
+                py_b.get(b"/test/from-node"), timeout=10.0
             )
 
             result_a = await asyncio.wait_for(
@@ -434,16 +456,19 @@ async def test_mixed_cluster(rust_available):
 
 
 @pytest.mark.asyncio
-async def test_identify_address_exchange(rust_available):
+async def test_identify_address_exchange(interop_binary):
     """Verify that Identify protocol correctly exchanges addresses between
-    Rust and Python nodes, and the Python node learns a routable address."""
+    the interop node and Python, and the Python node learns a routable address."""
+    lang, binary_path = interop_binary
 
-    with RustNode("put", "/test/identify-test", "test", timeout_secs=15) as rust:
+    with InteropNode(
+        binary_path, "put", "/test/identify-test", "test", timeout_secs=15
+    ) as remote:
         await asyncio.sleep(0.3)
 
         node = DhtNode()
         try:
-            await node.start("127.0.0.1", 0, bootstrap_peers=[rust.full_addr])
+            await node.start("127.0.0.1", 0, bootstrap_peers=[remote.full_addr])
             await asyncio.sleep(1.0)
 
             assert node.routing_table.size() > 0, "Routing table is empty after bootstrap"
@@ -469,17 +494,16 @@ LOW_LEVEL_PYTHON_VALUE = json.dumps({"rank": 1, "from": "python"})
 
 
 @pytest.fixture
-def rust_node_fixture():
-    """Start a Rust node in put mode for low-level tests, clean up on exit."""
-    if not RUST_AVAILABLE:
-        pytest.skip(f"Rust binary not found: {RUST_NODE_BIN}")
+def interop_node_fixture(interop_binary):
+    """Start an interop node in put mode for low-level tests, clean up on exit."""
+    lang, binary_path = interop_binary
 
     env = os.environ.copy()
     env["RUST_LOG"] = "info"
 
     proc = subprocess.Popen(
         [
-            RUST_NODE_BIN,
+            binary_path,
             "--mode", "put",
             "--timeout-secs", "30",
             "--key", LOW_LEVEL_TEST_KEY,
@@ -507,7 +531,7 @@ def rust_node_fixture():
 
     if host is None:
         proc.kill()
-        pytest.skip("Rust node didn't print LISTEN_ADDR")
+        pytest.skip(f"{lang} interop node didn't print LISTEN_ADDR")
 
     yield host, port
 
@@ -518,9 +542,9 @@ def rust_node_fixture():
         proc.kill()
 
 
-async def test_low_level_rust_get(rust_node_fixture):
-    """Connect to Rust node and GET a record using raw Kademlia RPC."""
-    host, port = rust_node_fixture
+async def test_low_level_node_get(interop_node_fixture):
+    """Connect to interop node and GET a record using raw Kademlia RPC."""
+    host, port = interop_node_fixture
     await asyncio.sleep(0.5)
 
     identity = Ed25519Identity.generate()
@@ -543,9 +567,9 @@ async def test_low_level_rust_get(rust_node_fixture):
     await conn.close()
 
 
-async def test_low_level_python_put_rust_get(rust_node_fixture):
-    """PUT a record to Rust node via raw Kademlia RPC, then GET it back."""
-    host, port = rust_node_fixture
+async def test_low_level_python_put_node_get(interop_node_fixture):
+    """PUT a record to interop node via raw Kademlia RPC, then GET it back."""
+    host, port = interop_node_fixture
     await asyncio.sleep(0.3)
 
     identity = Ed25519Identity.generate()
