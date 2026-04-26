@@ -75,7 +75,7 @@ If you need any of those, [py-libp2p](https://github.com/libp2p/py-libp2p) is th
 
 ## Status
 
-Alpha. CI-verified wire compatibility with rust-libp2p and go-libp2p reference implementations across all kad-dht core operations. APIs may shift before v1.0.
+Alpha. CI-verified wire compatibility with rust-libp2p and go-libp2p reference implementations across all kad-dht core operations. Reproducible 200-pod scale validation with rolling-restart soak (5/5 passed, 100% record availability during restart) - see [docs/scale-testing.md](docs/scale-testing.md). APIs may shift before v1.0.
 
 ## License
 
