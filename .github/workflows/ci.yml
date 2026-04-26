@@ -115,3 +115,31 @@ jobs:
 
       - name: Run interop tests
         run: pytest tests/test_interop.py -v --tb=short
+
+  interop-go:
+    name: Interop (go-libp2p)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache-dependency-path: tests/libp2p_kad_interop/go_node/go.sum
+
+      - name: Build Go interop binary
+        run: |
+          cd tests/libp2p_kad_interop/go_node
+          go build -o kad-interop-test-go .
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install kademlite
+        run: pip install -e .[test]
+
+      - name: Run interop tests
+        run: pytest tests/test_interop.py -v --tb=short

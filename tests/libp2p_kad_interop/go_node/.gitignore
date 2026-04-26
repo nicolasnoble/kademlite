@@ -1,0 +1,6 @@
+# Built binary
+kad-interop-test-go
+
+# Local Go cache (just in case)
+.cache/
+go.sum.lock
