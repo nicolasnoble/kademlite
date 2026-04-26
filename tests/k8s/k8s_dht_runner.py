@@ -39,9 +39,9 @@ import subprocess
 import sys
 import time
 
-from kademlite.crypto import Ed25519Identity, _base58btc_encode
+from kademlite.crypto import _base58btc_encode
 from kademlite.dht import DhtNode
-from kademlite.multiaddr import decode_multiaddr, PROTO_IP4
+from kademlite.multiaddr import PROTO_IP4, decode_multiaddr
 
 logging.basicConfig(
     level=logging.INFO,
@@ -306,10 +306,18 @@ async def test_concurrent_puts(node: DhtNode, results: TestResult) -> None:
     get_tasks = [get_one(i) for i in range(n_concurrent)]
     get_results = await asyncio.gather(*get_tasks)
     get_ok = sum(1 for r in get_results if r)
-    results.record(f"concurrent gets ({n_concurrent})", get_ok == n_concurrent, f"{get_ok}/{n_concurrent}")
+    results.record(
+        f"concurrent gets ({n_concurrent})",
+        get_ok == n_concurrent,
+        f"{get_ok}/{n_concurrent}",
+    )
 
 
-async def test_record_filter(node_with_filter: DhtNode, source_node: DhtNode, results: TestResult) -> None:
+async def test_record_filter(
+    node_with_filter: DhtNode,
+    source_node: DhtNode,
+    results: TestResult,
+) -> None:
     """Verify record_filter works across network boundaries."""
     log.info("TEST: record_filter")
     from kademlite.multiaddr import encode_multiaddr_ip4_tcp_p2p
@@ -324,7 +332,9 @@ async def test_record_filter(node_with_filter: DhtNode, source_node: DhtNode, re
     source_node.peer_store.add_addrs(filter_peer_id, [filter_addr])
 
     ok_good = await source_node._put_to_peer(filter_peer_id, [filter_addr], good_key, b'{"rank":0}')
-    ok_bad = await source_node._put_to_peer(filter_peer_id, [filter_addr], bad_key, b'{"evil":true}')
+    ok_bad = await source_node._put_to_peer(
+        filter_peer_id, [filter_addr], bad_key, b'{"evil":true}'
+    )
     await asyncio.sleep(0.3)
 
     good_rec = node_with_filter.kad_handler.get_local(good_key)
@@ -365,7 +375,9 @@ async def test_data_distribution(node: DhtNode, results: TestResult) -> None:
     import random
     all_peers = node.routing_table.all_peers()
     sample_size = min(20, len(all_peers))
-    sampled_peers = random.sample(all_peers, sample_size) if len(all_peers) > sample_size else all_peers
+    sampled_peers = (
+        random.sample(all_peers, sample_size) if len(all_peers) > sample_size else all_peers
+    )
     remote_hits = 0
     remote_peers_checked = 0
     for entry in sampled_peers:
