@@ -1,0 +1,20 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+    patch:
+      default:
+        target: 80%
+        informational: true
+
+ignore:
+  - "kademlite/proto/*_pb2.py"     # generated protobuf stubs
+  - "tests/k8s/k8s_dht_runner.py"  # K8s-cluster-only, not exercised by pytest
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
