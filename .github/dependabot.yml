@@ -1,0 +1,49 @@
+version: 2
+updates:
+  # Python dependencies (pyproject.toml at repo root)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "python"
+
+  # GitHub Actions versions across .github/workflows/
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "github-actions"
+
+  # Rust dependencies (interop test crate)
+  - package-ecosystem: "cargo"
+    directory: "/tests/libp2p_kad_interop/rust_node"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "rust"
+
+  # Go dependencies (interop test binary)
+  - package-ecosystem: "gomod"
+    directory: "/tests/libp2p_kad_interop/go_node"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "go"
