@@ -114,9 +114,15 @@ can reproduce and extend the same coverage on their own clusters.
 
 ## How discovery works
 
-There are no pre-shared peer IDs or multiaddrs. The deployment ships a
-headless `Service` named `kdl-dht`. Resolving its DNS name returns
-every pod IP in the `dht-peer` deployment; each peer dials those IPs
-on port 4001 and learns the other side's peer ID via the Noise
-handshake. This means scaling the deployment up or down is a single
-`kubectl scale` away with no configuration changes.
+Each pod resolves the headless `kdl-dht` Service's DNS name and
+bootstraps via kademlite's standard DNS provider. Bootstrap is
+bounded: each peer connects to up to `K=20` resolved neighbors and
+then lets Kademlia self-lookup populate the rest of its routing
+table, so a 200-pod cluster does not require every peer to hold
+connections to every other peer. Scaling the Deployment up or down
+is a single `kubectl scale` away with no configuration changes.
+
+See [`discovery.md`](discovery.md) for the full discovery model
+across all four bootstrap providers (explicit multiaddrs, DNS, SLURM,
+mDNS), the Noise + Identify handshake details, and the maintenance
+and eviction loops.
