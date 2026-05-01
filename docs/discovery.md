@@ -90,9 +90,30 @@ Concretely:
   candidate IP). The observed address feeds the IP voting described
   below.
 
-After all bootstrap dials have run, the node performs one iterative
-`FIND_NODE(self.peer_id)`. That call is what actually populates the
-K-buckets beyond the bootstrap seeds.
+After all bootstrap dials have run, the node performs two convergence
+steps before `start()` returns:
+
+1. **Self-lookup**: one iterative `FIND_NODE(self.peer_id)`. This
+   populates the K-buckets near the local node by pulling in peers
+   that the bootstrap dials' transitive routing tables know about.
+2. **Per-CPL bucket refresh** (added in v0.3.0, default on): one round
+   of `_refresh_buckets()` that runs an iterative `FIND_NODE` against
+   a randomly chosen target in each non-empty bucket beyond the
+   closest-neighbor bucket. This is the join procedure from the
+   original Kademlia paper (Maymounkov & Mazieres 2002) and matches
+   rust-libp2p's synchronous bootstrap behavior. Without it, a cold
+   consumer that PUTs/GETs immediately after `start()` operates against
+   a routing table populated only by the closest-neighbor bucket plus
+   whatever the self-lookup discovered transitively, so PUTs/GETs
+   against keys in distant buckets fail until the 5-minute maintenance
+   loop fires its own refresh.
+
+Opt out via `DhtNode.start(wait_until_routable=False)` if the per-CPL
+walks add unwanted latency (tests, constrained startups). The
+maintenance loop's periodic refresh still runs on its 5-minute cadence.
+For caller-driven readiness after `start(wait_until_routable=False)`,
+call `await node.wait_until_routable()` to run one round of refresh
+before issuing the first PUT/GET.
 
 ## Why bounded
 
