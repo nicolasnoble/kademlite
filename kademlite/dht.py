@@ -236,6 +236,11 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
                 tests or constrained startups where the maintenance loop's
                 periodic refresh is acceptable).
         """
+        # Reset run-scoped mDNS refresh gate so a stop/start cycle on
+        # the same DhtNode instance re-fires the one-shot refresh on
+        # its next first-mDNS-peer.
+        self._mdns_routable_refresh_done = False
+
         # Save for periodic re-bootstrap
         self._bootstrap_peers = bootstrap_peers or []
         self._bootstrap_dns = bootstrap_dns

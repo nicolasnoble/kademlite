@@ -296,6 +296,12 @@ async def _cleanup_partial_handshake(
     if writer is not None:
         try:
             writer.close()
+            # Await wait_closed so the transport actually drains before
+            # the function returns; otherwise the FD can stay open long
+            # enough to trigger ResourceWarnings or flaky FD-exhaustion
+            # in tests. Best-effort: failures here just mean the OS
+            # cleans up later.
+            await writer.wait_closed()
         except Exception as e:
             log.debug(f"writer.close during partial-handshake cleanup raised: {e}")
 

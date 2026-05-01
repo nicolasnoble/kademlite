@@ -166,8 +166,9 @@ async def test_mdns_first_peer_triggers_one_shot_refresh() -> None:
     addr_a = _node_multiaddr(node_a)
     try:
         node_b = DhtNode()
-        # No bootstrap configured; mDNS auto-enables but we'll feed
-        # the discovery callback manually.
+        # No bootstrap configured; mDNS is explicitly disabled so we
+        # can drive _on_mdns_peer manually with deterministic timing
+        # rather than waiting for real mDNS multicast traffic.
         await node_b.start("127.0.0.1", 0, enable_mdns=False)
 
         refresh_calls = []

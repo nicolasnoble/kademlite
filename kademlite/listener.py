@@ -111,20 +111,20 @@ class Listener:
             log.warning(f"failed to accept connection from {remote}: {e}")
         finally:
             # Close the writer on every non-success path including
-            # external cancellation of _handle_connection itself.
-            # asyncio.CancelledError is a BaseException (not Exception)
-            # so the previous structure with two except clauses skipped
-            # writer.close on cancellation - the writer leaked, which
-            # contradicts the listener-owns-writer assumption that
-            # Connection.accept() relies on.
-            if not accept_succeeded:
-                try:
-                    writer.close()
-                    # Wait for the underlying transport to actually drain
-                    # so the slot is released before we decrement the
-                    # active counter. Best-effort: failures here just
-                    # mean the OS gets to clean up later.
-                    await writer.wait_closed()
-                except Exception as e:
-                    log.debug(f"writer.close/wait_closed during cleanup raised: {e}")
-            self._active_connections -= 1
+            # external cancellation of _handle_connection itself, and
+            # ALWAYS decrement _active_connections - if cancellation
+            # lands inside writer.wait_closed, we'd otherwise leak the
+            # listener slot forever, defeating the whole point of the
+            # max_connections cap.
+            try:
+                if not accept_succeeded:
+                    try:
+                        writer.close()
+                        # Wait for the underlying transport to actually
+                        # drain. Best-effort: failures here just mean
+                        # the OS gets to clean up later.
+                        await writer.wait_closed()
+                    except Exception as e:
+                        log.debug(f"writer.close/wait_closed during cleanup raised: {e}")
+            finally:
+                self._active_connections -= 1
