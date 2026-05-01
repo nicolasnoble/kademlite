@@ -95,7 +95,7 @@ async def test_listener_recovers_after_dropping_silent_peers() -> None:
 
         await conn.close()
 
-        for r, w in silent:
+        for _r, w in silent:
             w.close()
             try:
                 await w.wait_closed()

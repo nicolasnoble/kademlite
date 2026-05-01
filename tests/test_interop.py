@@ -422,9 +422,15 @@ async def test_mixed_cluster(interop_binary):
         await py_a.start("127.0.0.1", 0)
         addr_a = node_multiaddr(py_a)
 
+        # The interop node dials py_a first, so py_a ends up in its routing
+        # table and the iterative PUT replicates /test/from-node to py_a.
+        # Without the explicit peer= the interop node's overlay is isolated
+        # and the record never reaches py_a, so py_b's GET via py_a fails.
         with InteropNode(
             binary_path, "put", "/test/from-node",
-            json.dumps({"origin": lang}), timeout_secs=30,
+            json.dumps({"origin": lang}),
+            peer=addr_a,
+            timeout_secs=30,
         ):
             await asyncio.sleep(1.0)
 

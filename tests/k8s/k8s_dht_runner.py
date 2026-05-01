@@ -625,14 +625,19 @@ async def test_kclosest_replication_correctness(
         # Sample a comparable number of NON-closest peers as a control.
         nonexpected_sample = sorted_peers[k:k + k] if len(sorted_peers) > 2 * k else []
 
-        async def query_local(peer_id: bytes) -> bool:
-            """Direct (non-iterative) query; returns True only if peer holds the record locally."""
+        async def query_local(peer_id: bytes, key_=key) -> bool:
+            """Direct (non-iterative) query; returns True only if peer holds the record locally.
+
+            ``key_`` defaults to the current loop iteration's ``key`` so that
+            asynchronous gather() across closures doesn't all bind to the
+            last loop value (B023).
+            """
             try:
                 conn = await asyncio.wait_for(
                     node.peer_store.get_or_dial(peer_id), timeout=5.0
                 )
                 response = await asyncio.wait_for(
-                    kad_get_value(conn, key), timeout=5.0
+                    kad_get_value(conn, key_), timeout=5.0
                 )
                 if response is None:
                     return False

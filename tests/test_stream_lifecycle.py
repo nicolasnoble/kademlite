@@ -27,8 +27,8 @@ from unittest.mock import patch
 
 import pytest  # noqa: F401
 
-from kademlite.crypto import _base58btc_encode
 from kademlite.connection import Connection
+from kademlite.crypto import _base58btc_encode
 from kademlite.dht import DhtNode
 from kademlite.kademlia import (
     KADEMLIA_PROTOCOL,
@@ -92,7 +92,7 @@ async def test_kad_get_value_releases_stream_on_failure() -> None:
             await hang_event.wait()
 
         with patch.object(node_b.kad_handler, "handle_stream", new=hang):
-            with pytest.raises(Exception):  # any failure shape acceptable
+            with pytest.raises((asyncio.TimeoutError, asyncio.IncompleteReadError)):
                 await asyncio.wait_for(
                     kad_get_value(conn, b"/test/key"), timeout=0.2
                 )
@@ -121,7 +121,7 @@ async def test_kad_put_value_releases_stream_on_failure() -> None:
             await hang_event.wait()
 
         with patch.object(node_b.kad_handler, "handle_stream", new=hang):
-            with pytest.raises(Exception):
+            with pytest.raises((asyncio.TimeoutError, asyncio.IncompleteReadError)):
                 await asyncio.wait_for(
                     kad_put_value(conn, b"/test/key", b"value"), timeout=0.2
                 )
@@ -149,7 +149,7 @@ async def test_kad_find_node_releases_stream_on_failure() -> None:
             await hang_event.wait()
 
         with patch.object(node_b.kad_handler, "handle_stream", new=hang):
-            with pytest.raises(Exception):
+            with pytest.raises((asyncio.TimeoutError, asyncio.IncompleteReadError)):
                 await asyncio.wait_for(
                     kad_find_node(conn, b"target"), timeout=0.2
                 )
@@ -398,7 +398,11 @@ class _FakeStreamWriter:
 class _FakeStreamReader:
     """Stand-in for asyncio.StreamReader that returns a fixed payload or raises."""
 
-    def __init__(self, payload: bytes | None = None, raise_exc: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        payload: bytes | None = None,
+        raise_exc: BaseException | None = None,
+    ) -> None:
         self.payload = payload
         self.raise_exc = raise_exc
         self._consumed = False
