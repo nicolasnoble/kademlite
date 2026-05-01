@@ -82,17 +82,39 @@ class Connection:
             log.error(f"inbound handler error: {e}")
 
     async def _negotiate_inbound_stream(self, stream: YamuxStream) -> None:
-        """Negotiate protocol for an inbound stream and dispatch it."""
+        """Negotiate protocol for an inbound stream and dispatch it.
+
+        On a successful negotiation the stream is handed off to a protocol
+        handler queue and that handler owns the close. Any failure path -
+        negotiation error, cancellation, unknown protocol with no
+        registered handler, full queue - closes the stream here so it
+        doesn't outlive this method.
+        """
+        dispatched = False
         try:
             reader, writer = _stream_to_rw(stream)
             supported = list(self._protocol_handlers.keys())
             protocol = await negotiate_inbound(reader, writer, supported)
             log.debug(f"inbound stream {stream.stream_id}: negotiated {protocol}")
             q = self._protocol_handlers.get(protocol)
-            if q:
+            if q is None:
+                log.warning(
+                    f"inbound stream {stream.stream_id}: no handler for "
+                    f"negotiated protocol {protocol}"
+                )
+            else:
                 q.put_nowait((stream, reader, writer))
+                dispatched = True
         except Exception as e:
             log.warning(f"inbound stream negotiation failed: {e}")
+        finally:
+            if not dispatched:
+                try:
+                    await stream.close()
+                except Exception as close_err:
+                    log.debug(
+                        f"inbound stream close after dispatch failure raised: {close_err}"
+                    )
 
     async def open_stream(
         self, protocol_id: str
