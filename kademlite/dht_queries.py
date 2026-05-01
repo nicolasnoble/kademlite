@@ -65,7 +65,10 @@ class QueryMixin:
 
         for _round in range(MAX_LOOKUP_ROUNDS):
             # Sort by distance, pick unqueried peers up to current parallelism
-            candidates = sorted(peer_map.keys(), key=lambda p: xor_distance(peer_kad[p], target_kad))
+            candidates = sorted(
+                peer_map.keys(),
+                key=lambda p: xor_distance(peer_kad[p], target_kad),
+            )
             # Skip peers already marked disconnected - they'd just timeout
             to_query = [
                 p for p in candidates

@@ -197,6 +197,7 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
         bootstrap_dns_port: int = 4001,
         bootstrap_slurm: str | None = None,
         enable_mdns: bool | None = None,
+        wait_until_routable: bool = True,
     ) -> None:
         """Start the DHT node.
 
@@ -217,6 +218,16 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
             enable_mdns: enable mDNS peer discovery. If None (default),
                 auto-detected: enabled when no other bootstrap mechanism
                 is configured.
+            wait_until_routable: when True (default), after bootstrap
+                completes its self-lookup, run one round of per-CPL
+                bucket refresh before returning so the routing table has
+                seen distant-bucket peers. Matches the original Kademlia
+                paper's join procedure and rust-libp2p's behavior. Cold
+                consumers that PUT/GET immediately after start() see
+                full-overlay convergence rather than a partially-populated
+                neighborhood. Set False to skip the per-bucket walks (for
+                tests or constrained startups where the maintenance loop's
+                periodic refresh is acceptable).
         """
         # Save for periodic re-bootstrap
         self._bootstrap_peers = bootstrap_peers or []
@@ -251,9 +262,21 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
         if self._bootstrap_hostlist:
             await self.bootstrap_from_hostlist(self._bootstrap_hostlist, self._bootstrap_dns_port)
 
+        # Per-CPL bucket refresh: matches the original Kademlia join
+        # procedure (Maymounkov & Mazieres 2002) and rust-libp2p's
+        # synchronous bootstrap. Without this, a cold consumer sees only
+        # the closest-neighbor bucket plus whatever the self-lookup
+        # discovered transitively; PUTs and GETs against keys in distant
+        # buckets fail until the 5-minute maintenance loop fires its own
+        # refresh. Skipped on opt-out (wait_until_routable=False) and on
+        # the no-bootstrap path (mDNS-only nodes have nothing to refresh
+        # against until peers are discovered).
+        has_bootstrap = self._bootstrap_peers or self._bootstrap_dns or self._bootstrap_hostlist
+        if wait_until_routable and has_bootstrap and self.routing_table.size() > 0:
+            await self._refresh_buckets()
+
         # Start background loops
         self._republish_task = asyncio.create_task(self._republish_loop())
-        has_bootstrap = self._bootstrap_peers or self._bootstrap_dns or self._bootstrap_hostlist
         if has_bootstrap:
             self._bootstrap_task = asyncio.create_task(self._periodic_bootstrap_loop())
 
@@ -272,6 +295,26 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
             # Also start periodic bootstrap loop for mDNS (to re-query on sparse table)
             if not self._bootstrap_task:
                 self._bootstrap_task = asyncio.create_task(self._periodic_bootstrap_loop())
+
+    async def wait_until_routable(self) -> None:
+        """Run one round of per-CPL bucket refresh.
+
+        Provides a caller-driven equivalent to the synchronous bootstrap
+        finalization in rust-libp2p (which chains per-bucket walks into
+        the bootstrap QueryId so it doesn't finish until the buckets fill)
+        and go-libp2p's ``RefreshRoutingTable`` / ``ForceRefresh``. After
+        this returns, the routing table has seen peers across all
+        non-empty CPL buckets, not just the closest-neighbor bucket
+        populated by the self-lookup.
+
+        Useful when ``DhtNode.start(wait_until_routable=False)`` was used
+        and the caller wants to verify routing readiness before issuing
+        the first PUT/GET. Idempotent and cheap to call multiple times,
+        though the per-bucket walks have nontrivial wall-time cost.
+        """
+        if self.routing_table.size() == 0:
+            return
+        await self._refresh_buckets()
 
     async def stop(self) -> None:
         """Stop the DHT node."""
