@@ -56,11 +56,13 @@ class MaintenanceMixin:
         try:
             while True:
                 await asyncio.sleep(BOOTSTRAP_INTERVAL)
-                size = self.routing_table.size()
 
-                # Prune disconnected peers before checking table size so the
-                # sparse-table check reflects actual reachable peers.
+                # Prune disconnected peers before sampling table size so the
+                # sparse-table check reflects actual reachable peers. Reading
+                # size first would race against the prune and skip the
+                # recovery cycle when pruning drops us below k.
                 self._quick_prune()
+                size = self.routing_table.size()
 
                 if size < self._k:
                     # Sparse table: re-dial bootstrap peers first
