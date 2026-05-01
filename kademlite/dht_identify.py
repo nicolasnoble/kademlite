@@ -16,6 +16,7 @@ from .dht_utils import _filter_routable_addrs, _log_task_exception
 from .identify import decode_identify_msg, encode_identify_msg
 from .kademlia import (
     KADEMLIA_PROTOCOL,
+    _close_stream_quietly,
     _read_length_prefixed,
     _write_length_prefixed,
 )
@@ -67,9 +68,10 @@ class IdentifyMixin:
             )
             _write_length_prefixed(writer, msg)
             await writer.drain()
-            await stream.close()
         except Exception as e:
             log.warning(f"identify handler error: {e}")
+        finally:
+            await _close_stream_quietly(stream)
 
     def _setup_identify_push_handler(self, conn: Connection) -> None:
         """Register the Identify Push protocol handler on a connection."""
@@ -110,6 +112,8 @@ class IdentifyMixin:
                 self.peer_store.replace_addrs(conn.remote_peer_id, routable)
         except Exception as e:
             log.debug(f"identify push handler error: {e}")
+        finally:
+            await _close_stream_quietly(stream)
 
     async def _push_identify_to_all(self) -> None:
         """Push our updated Identify message to all connected peers (fire-and-forget)."""
@@ -118,6 +122,7 @@ class IdentifyMixin:
             return
         log.info(f"pushing updated identify to {len(peers)} connected peer(s)")
         for peer_id, conn in peers:
+            stream = None
             try:
                 stream, reader, writer = await asyncio.wait_for(
                     conn.open_stream(IDENTIFY_PUSH_PROTOCOL), timeout=5.0
@@ -130,15 +135,18 @@ class IdentifyMixin:
                 )
                 _write_length_prefixed(writer, msg)
                 await writer.drain()
-                await stream.close()
             except Exception as e:
                 log.debug(f"identify push to {peer_id.hex()[:16]}... failed: {e}")
+            finally:
+                if stream is not None:
+                    await _close_stream_quietly(stream)
 
     async def _perform_identify(self, conn: Connection) -> list[bytes]:
         """Open an outbound Identify stream and learn the remote peer's listen addrs.
 
         Returns a list of binary multiaddrs, or [] on failure.
         """
+        stream = None
         try:
             stream, reader, writer = await asyncio.wait_for(
                 conn.open_stream(IDENTIFY_PROTOCOL), timeout=5.0
@@ -161,6 +169,9 @@ class IdentifyMixin:
         except Exception as e:
             log.warning(f"identify exchange failed with {conn.remote_peer_id.hex()[:16]}...: {e}")
             return []
+        finally:
+            if stream is not None:
+                await _close_stream_quietly(stream)
 
     async def _maybe_set_observed_ip(self, observed_addr: bytes) -> None:
         """Extract our IP from an Identify observed_addr and update votes.

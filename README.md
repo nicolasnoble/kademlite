@@ -20,6 +20,14 @@ A minimal, single-purpose libp2p Kademlia stack for Python applications that wan
 - **Bootstrap mechanisms for cluster deployments.** Explicit multiaddrs, K8s headless DNS service discovery, SLURM hostlist parsing, and mDNS for single-LAN.
 - **CI-tested cross-implementation interop.** Every commit runs against reference rust-libp2p and go-libp2p binaries to verify wire compatibility. Wire-compat isn't claimed - it's mechanically verified.
 
+## Scope
+
+kademlite implements the subset of the libp2p kad-dht protocol that's load-bearing for peer-direct service discovery and metadata coordination:
+
+- **Supported RPCs:** `PUT_VALUE`, `GET_VALUE`, `FIND_NODE`, `PING`. Distance metric is the spec's `XOR(sha256(a), sha256(b))` so closest-peer ordering interops with go/rust libp2p.
+- **Not supported:** `ADD_PROVIDER` and `GET_PROVIDERS`. The protobuf message types are wire-declared (so kademlite ignores them gracefully when go/rust peers send them) but provider routing is intentionally out of scope. If you need content routing, use go-libp2p or rust-libp2p directly.
+- **No relay, no pubsub, no NAT traversal beyond `Identify`'s `observed_addr`.**
+
 ## Install
 
 ```bash

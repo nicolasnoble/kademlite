@@ -82,25 +82,61 @@ class Connection:
             log.error(f"inbound handler error: {e}")
 
     async def _negotiate_inbound_stream(self, stream: YamuxStream) -> None:
-        """Negotiate protocol for an inbound stream and dispatch it."""
+        """Negotiate protocol for an inbound stream and dispatch it.
+
+        On a successful negotiation the stream is handed off to a protocol
+        handler queue and that handler owns the close. Any failure path -
+        negotiation error, cancellation, unknown protocol with no
+        registered handler, full queue - closes the stream here so it
+        doesn't outlive this method.
+        """
+        dispatched = False
         try:
             reader, writer = _stream_to_rw(stream)
             supported = list(self._protocol_handlers.keys())
             protocol = await negotiate_inbound(reader, writer, supported)
             log.debug(f"inbound stream {stream.stream_id}: negotiated {protocol}")
             q = self._protocol_handlers.get(protocol)
-            if q:
+            if q is None:
+                log.warning(
+                    f"inbound stream {stream.stream_id}: no handler for "
+                    f"negotiated protocol {protocol}"
+                )
+            else:
                 q.put_nowait((stream, reader, writer))
+                dispatched = True
         except Exception as e:
             log.warning(f"inbound stream negotiation failed: {e}")
+        finally:
+            if not dispatched:
+                # Use the cancel-safe close helper so a cancellation in
+                # the caller's task can't interrupt the close mid-await
+                # and leave the stream live.
+                from .kademlia import _close_stream_quietly
+                await _close_stream_quietly(stream)
 
     async def open_stream(
         self, protocol_id: str
     ) -> tuple[YamuxStream, asyncio.StreamReader, asyncio.StreamWriter]:
-        """Open a new outbound stream and negotiate the given protocol."""
+        """Open a new outbound stream and negotiate the given protocol.
+
+        If multistream-select negotiation fails or is cancelled after the
+        YamuxStream has been opened, close the stream before propagating
+        so a half-opened stream doesn't leak on the connection. The
+        caller never sees the stream object on a failed negotiation, so
+        only this method can clean it up.
+        """
         stream = await self.yamux.open_stream()
-        reader, writer = _stream_to_rw(stream)
-        await negotiate_outbound(reader, writer, protocol_id)
+        try:
+            reader, writer = _stream_to_rw(stream)
+            await negotiate_outbound(reader, writer, protocol_id)
+        except BaseException:
+            # Use the cancel-safe close helper: caller's cancellation
+            # could otherwise interrupt the close mid-await and leak
+            # the half-opened yamux stream.
+            from .kademlia import _close_stream_quietly
+            await _close_stream_quietly(stream)
+            raise
         return stream, reader, writer
 
     @property

@@ -9,6 +9,7 @@ Wire protocol uses protobuf messages sent as length-prefixed frames
 over a Yamux stream: <uvarint-length><protobuf-message>
 """
 
+import asyncio
 import logging
 
 from .crypto import _encode_uvarint
@@ -171,19 +172,62 @@ def _write_length_prefixed(writer, data: bytes) -> None:
     writer.write(_encode_uvarint(len(data)) + data)
 
 
+async def _close_stream_quietly(stream) -> None:
+    """Best-effort stream close that survives caller-task cancellation.
+
+    Cancellation safety: spawns the close as a background task and shields
+    it from the caller's cancellation. If the caller's task is cancelled
+    mid-close, the close completes in the background and CancelledError
+    re-raises to honor the cancellation contract. On Python 3.11+ a bare
+    ``await stream.close()`` inside a finally block can be interrupted by
+    a pending cancellation before FIN/RST is sent, leaving the yamux
+    stream live; the shield + ensure_future pattern prevents that leak.
+
+    Errors raised by ``stream.close()`` itself are logged at debug level.
+    Used in cleanup paths of outbound Kad RPCs, identify handlers, and
+    inbound stream negotiation - anywhere the close itself might race
+    with cancellation.
+    """
+    close_task = asyncio.ensure_future(stream.close())
+
+    def _consume_close_exc(t: asyncio.Task) -> None:
+        # When the caller's task is cancelled while shield() is awaiting
+        # close_task, shield re-raises CancelledError immediately and we
+        # never await close_task ourselves. Without this callback, a
+        # subsequent stream.close() exception would surface as an
+        # asyncio "Task exception was never retrieved" warning. Consume
+        # and log it instead.
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            log.debug(f"stream close raised in background: {exc}")
+
+    close_task.add_done_callback(_consume_close_exc)
+
+    try:
+        await asyncio.shield(close_task)
+    except asyncio.CancelledError:
+        # Caller is cancelling us. close_task continues running outside
+        # our task scope (the done-callback above will log any failure);
+        # let the cancellation propagate.
+        raise
+    except Exception as e:
+        log.debug(f"stream close raised during cleanup: {e}")
+
+
 async def kad_get_value(conn, key: bytes) -> dict | None:
     """Send a GET_VALUE request over a new Kademlia stream."""
     stream, reader, writer = await conn.open_stream(KADEMLIA_PROTOCOL)
+    try:
+        request = encode_kad_message(MSG_GET_VALUE, key=key)
+        _write_length_prefixed(writer, request)
+        await writer.drain()
 
-    request = encode_kad_message(MSG_GET_VALUE, key=key)
-    _write_length_prefixed(writer, request)
-    await writer.drain()
-
-    response_data = await _read_length_prefixed(reader)
-    response = decode_kad_message(response_data)
-
-    await stream.close()
-    return response
+        response_data = await _read_length_prefixed(reader)
+        return decode_kad_message(response_data)
+    finally:
+        await _close_stream_quietly(stream)
 
 
 async def kad_put_value(
@@ -192,29 +236,27 @@ async def kad_put_value(
 ) -> dict | None:
     """Send a PUT_VALUE request over a new Kademlia stream."""
     stream, reader, writer = await conn.open_stream(KADEMLIA_PROTOCOL)
+    try:
+        record = encode_record(key, value, publisher=publisher, ttl=ttl)
+        request = encode_kad_message(MSG_PUT_VALUE, key=key, record=record)
+        _write_length_prefixed(writer, request)
+        await writer.drain()
 
-    record = encode_record(key, value, publisher=publisher, ttl=ttl)
-    request = encode_kad_message(MSG_PUT_VALUE, key=key, record=record)
-    _write_length_prefixed(writer, request)
-    await writer.drain()
-
-    response_data = await _read_length_prefixed(reader)
-    response = decode_kad_message(response_data)
-
-    await stream.close()
-    return response
+        response_data = await _read_length_prefixed(reader)
+        return decode_kad_message(response_data)
+    finally:
+        await _close_stream_quietly(stream)
 
 
 async def kad_find_node(conn, key: bytes) -> dict | None:
     """Send a FIND_NODE request over a new Kademlia stream."""
     stream, reader, writer = await conn.open_stream(KADEMLIA_PROTOCOL)
+    try:
+        request = encode_kad_message(MSG_FIND_NODE, key=key)
+        _write_length_prefixed(writer, request)
+        await writer.drain()
 
-    request = encode_kad_message(MSG_FIND_NODE, key=key)
-    _write_length_prefixed(writer, request)
-    await writer.drain()
-
-    response_data = await _read_length_prefixed(reader)
-    response = decode_kad_message(response_data)
-
-    await stream.close()
-    return response
+        response_data = await _read_length_prefixed(reader)
+        return decode_kad_message(response_data)
+    finally:
+        await _close_stream_quietly(stream)

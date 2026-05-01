@@ -11,8 +11,6 @@ import asyncio
 import logging
 import os
 
-from .routing import K
-
 log = logging.getLogger(__name__)
 
 # Periodic bootstrap interval: 5 minutes (matches rust-libp2p)
@@ -53,46 +51,63 @@ class MaintenanceMixin:
 
         Always runs a self-lookup (and re-dials bootstrap peers when sparse).
         This matches rust-libp2p behavior: periodic bootstrap is unconditional,
-        not gated on routing table size.
+        not gated on routing table size. The actual work of one cycle is in
+        ``_periodic_bootstrap_tick`` so tests can drive it deterministically
+        without monkey-patching ``asyncio.sleep``.
         """
         try:
             while True:
                 await asyncio.sleep(BOOTSTRAP_INTERVAL)
-                size = self.routing_table.size()
-
-                # Prune disconnected peers before checking table size so the
-                # sparse-table check reflects actual reachable peers.
-                self._quick_prune()
-
-                if size < K:
-                    # Sparse table: re-dial bootstrap peers first
-                    log.info(
-                        f"periodic re-bootstrap: routing table has "
-                        f"{size} peers (< K={K}), re-dialing bootstrap peers"
-                    )
-                    if self._bootstrap_peers:
-                        await self.bootstrap(self._bootstrap_peers)
-                    if self._bootstrap_dns:
-                        await self.bootstrap_from_dns(self._bootstrap_dns, self._bootstrap_dns_port)
-                    if self._bootstrap_hostlist:
-                        await self.bootstrap_from_hostlist(
-                            self._bootstrap_hostlist, self._bootstrap_dns_port
-                        )
-                    if self._mdns:
-                        self._mdns.send_query()
-                elif size > 0:
-                    # Table is healthy: just do a self-lookup to discover
-                    # new nearby peers and refresh routing
-                    log.debug(
-                        f"periodic self-lookup: routing table has {size} peers"
-                    )
-                    await self._iterative_find_node(self.peer_id)
-
-                # Bucket refresh: lookup a random key in each non-empty bucket
-                # to discover peers we wouldn't find through self-lookup alone
-                await self._refresh_buckets()
+                await self._periodic_bootstrap_tick()
         except asyncio.CancelledError:
             pass
+
+    async def _periodic_bootstrap_tick(self) -> None:
+        """One iteration of the periodic-bootstrap loop body.
+
+        Prunes the routing table, then either re-dials bootstrap peers
+        (sparse table) or runs a self-lookup (healthy table), then
+        refreshes buckets. Extracted from the loop body so unit tests
+        can drive a single cycle without faking ``asyncio.sleep``.
+
+        Inspection API: tests in this repository call this directly to
+        assert prune-before-size ordering and bootstrap-decision logic.
+        Production code should not call this except via the loop.
+        """
+        # Prune disconnected peers before sampling table size so the
+        # sparse-table check reflects actual reachable peers. Reading
+        # size first would race against the prune and skip the
+        # recovery cycle when pruning drops us below k.
+        self._quick_prune()
+        size = self.routing_table.size()
+
+        if size < self._k:
+            # Sparse table: re-dial bootstrap peers first
+            log.info(
+                f"periodic re-bootstrap: routing table has "
+                f"{size} peers (< k={self._k}), re-dialing bootstrap peers"
+            )
+            if self._bootstrap_peers:
+                await self.bootstrap(self._bootstrap_peers)
+            if self._bootstrap_dns:
+                await self.bootstrap_from_dns(self._bootstrap_dns, self._bootstrap_dns_port)
+            if self._bootstrap_hostlist:
+                await self.bootstrap_from_hostlist(
+                    self._bootstrap_hostlist, self._bootstrap_dns_port
+                )
+            if self._mdns:
+                self._mdns.send_query()
+        elif size > 0:
+            # Table is healthy: just do a self-lookup to discover
+            # new nearby peers and refresh routing
+            log.debug(
+                f"periodic self-lookup: routing table has {size} peers"
+            )
+            await self._iterative_find_node(self.peer_id)
+
+        # Bucket refresh: lookup a random key in each non-empty bucket
+        # to discover peers we wouldn't find through self-lookup alone
+        await self._refresh_buckets()
 
     async def _refresh_buckets(self) -> None:
         """Refresh routing table buckets by looking up a random key in each.
@@ -112,33 +127,31 @@ class MaintenanceMixin:
             except Exception as e:
                 log.debug(f"bucket {i} refresh failed: {e}")
 
-    def _random_key_for_bucket(self, cpl: int) -> bytes:
-        """Generate a random peer ID that falls into the given bucket (CPL).
+    def _random_key_for_bucket(self, cpl: int, max_attempts: int = 65536) -> bytes:
+        """Generate a random preimage whose Kad-keyspace CPL with our local
+        peer ID matches the given bucket index.
 
-        The key shares `cpl` leading bits with our peer ID, then differs at
-        bit `cpl`, and is random after that.
+        Because the Kad keyspace is reached through SHA-256, we cannot
+        construct a preimage with a target keyspace CPL directly: we use
+        rejection sampling. The expected attempts to hit bucket ``cpl`` is
+        ``2^(cpl+1)``; for typical populated buckets (cpl <= ~12) this is
+        cheap. For very deep buckets it may exhaust ``max_attempts``, in
+        which case we fall back to a uniformly random key (still useful
+        for discovery, just not bucket-targeted).
         """
-        local = self.peer_id
-        key = bytearray(os.urandom(len(local)))
+        from .routing import _common_prefix_length, kad_key
 
-        # Copy the first `cpl` full bytes
-        full_bytes = cpl // 8
-        for i in range(full_bytes):
-            key[i] = local[i]
-
-        # Handle the partial byte: copy top bits, flip the divergence bit
-        remaining_bits = cpl % 8
-        if full_bytes < len(local):
-            byte_val = local[full_bytes]
-            # The bit at position `remaining_bits` must differ from local
-            flip_bit = 0x80 >> remaining_bits
-            # XOR the original byte to flip exactly the divergence bit
-            flipped = byte_val ^ flip_bit
-            # Keep top (remaining_bits + 1) bits from flipped, rest random
-            control_mask = ((0xFF << (8 - remaining_bits)) | flip_bit) & 0xFF
-            key[full_bytes] = (flipped & control_mask) | (key[full_bytes] & ~control_mask)
-
-        return bytes(key)
+        local_kad = kad_key(self.peer_id)
+        for _ in range(max_attempts):
+            candidate = os.urandom(32)
+            if _common_prefix_length(local_kad, kad_key(candidate)) == cpl:
+                return candidate
+        # Couldn't hit the target bucket - fall back to a random key.
+        log.debug(
+            f"bucket refresh: rejection sampling exhausted at cpl={cpl} "
+            f"after {max_attempts} attempts, using random key"
+        )
+        return os.urandom(32)
 
     async def _republish_loop(self) -> None:
         """Background loop: re-PUT originated records, replicate stored, and expire old ones.

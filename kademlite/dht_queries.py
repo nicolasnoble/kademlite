@@ -11,7 +11,7 @@ import asyncio
 import logging
 
 from .kademlia import kad_find_node, kad_get_value, kad_put_value
-from .routing import ALPHA, K, xor_distance
+from .routing import kad_key, xor_distance
 
 log = logging.getLogger(__name__)
 
@@ -35,14 +35,14 @@ class QueryMixin:
     async def _iterative_find_node(self, target: bytes) -> list[tuple[bytes, list[bytes]]]:
         """Iterative FIND_NODE lookup with stall detection.
 
-        Returns list of (peer_id, addrs) for the K closest peers found.
+        Returns list of (peer_id, addrs) for the k closest peers found.
 
         When no new closer peers are discovered in a round (stall), the
         parallelism is increased to query more peers simultaneously. This
         matches rust-libp2p's adaptive approach to query termination.
         """
         # Seed with locally known closest peers
-        closest = self.routing_table.closest_peers(target, K)
+        closest = self.routing_table.closest_peers(target, self._k)
         if not closest:
             return []
 
@@ -53,12 +53,13 @@ class QueryMixin:
         for entry in closest:
             peer_map[entry.peer_id] = entry.addrs
 
-        parallelism = ALPHA
+        parallelism = self._alpha
         stall_count = 0
+        target_kad = kad_key(target)
 
         for _round in range(MAX_LOOKUP_ROUNDS):
             # Sort by distance, pick unqueried peers up to current parallelism
-            candidates = sorted(peer_map.keys(), key=lambda p: xor_distance(p, target))
+            candidates = sorted(peer_map.keys(), key=lambda p: xor_distance(kad_key(p), target_kad))
             # Skip peers already marked disconnected - they'd just timeout
             to_query = [
                 p for p in candidates
@@ -78,7 +79,7 @@ class QueryMixin:
             new_closer_found = False
             # Track the previous best distance for stall detection
             prev_best = min(
-                (xor_distance(p, target) for p in peer_map),
+                (xor_distance(kad_key(p), target_kad) for p in peer_map),
                 default=None,
             )
 
@@ -90,7 +91,7 @@ class QueryMixin:
                         peer_map[pid] = addrs
                         self.routing_table.add_or_update(pid, addrs)
                         self.peer_store.add_addrs(pid, addrs)
-                        if prev_best is None or xor_distance(pid, target) < prev_best:
+                        if prev_best is None or xor_distance(kad_key(pid), target_kad) < prev_best:
                             new_closer_found = True
 
             if not new_closer_found:
@@ -99,14 +100,14 @@ class QueryMixin:
                     # Two consecutive stalls: query is converged
                     break
                 # First stall: boost parallelism to try harder
-                parallelism = min(ALPHA * STALL_PARALLELISM_BOOST, K)
+                parallelism = min(self._alpha * STALL_PARALLELISM_BOOST, self._k)
             else:
                 stall_count = 0
-                parallelism = ALPHA
+                parallelism = self._alpha
 
-        # Return K closest
-        sorted_peers = sorted(peer_map.keys(), key=lambda p: xor_distance(p, target))
-        return [(p, peer_map[p]) for p in sorted_peers[:K]]
+        # Return k closest
+        sorted_peers = sorted(peer_map.keys(), key=lambda p: xor_distance(kad_key(p), target_kad))
+        return [(p, peer_map[p]) for p in sorted_peers[:self._k]]
 
     async def _find_node_single(
         self, peer_id: bytes, addrs: list[bytes], target: bytes
@@ -140,7 +141,7 @@ class QueryMixin:
         Walks peers progressively closer to the key, stopping when a record
         is found or all closest peers have been queried.
         """
-        closest = self.routing_table.closest_peers(key, K)
+        closest = self.routing_table.closest_peers(key, self._k)
         if not closest:
             return None
 
@@ -151,12 +152,13 @@ class QueryMixin:
         for entry in closest:
             peer_map[entry.peer_id] = entry.addrs
 
+        key_kad = kad_key(key)
         for _round in range(MAX_LOOKUP_ROUNDS):
-            candidates = sorted(peer_map.keys(), key=lambda p: xor_distance(p, key))
+            candidates = sorted(peer_map.keys(), key=lambda p: xor_distance(kad_key(p), key_kad))
             to_query = [
                 p for p in candidates
                 if p not in queried and self._is_peer_reachable(p)
-            ][:ALPHA]
+            ][:self._alpha]
 
             if not to_query:
                 break

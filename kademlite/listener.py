@@ -23,6 +23,11 @@ class Listener:
     # Default max concurrent inbound connections (0 = unlimited)
     DEFAULT_MAX_CONNECTIONS = 256
 
+    # Cap on the responder-side handshake (multistream + Noise + Yamux).
+    # A slow or malicious peer that drags out the handshake otherwise
+    # holds a max_connections slot indefinitely.
+    DEFAULT_HANDSHAKE_TIMEOUT = 10.0
+
     def __init__(
         self,
         identity: Ed25519Identity,
@@ -31,13 +36,19 @@ class Listener:
         supported_protocols: list[str] | None = None,
         on_connection: Callable[[Connection], Awaitable[None]] | None = None,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
+        handshake_timeout: float = DEFAULT_HANDSHAKE_TIMEOUT,
     ):
+        if handshake_timeout <= 0:
+            raise ValueError(
+                f"handshake_timeout must be positive, got {handshake_timeout}"
+            )
         self.identity = identity
         self.host = host
         self.port = port
         self.supported_protocols = supported_protocols
         self.on_connection = on_connection
         self.max_connections = max_connections
+        self.handshake_timeout = handshake_timeout
         self._server: asyncio.Server | None = None
         self._listen_addr: tuple[str, int] | None = None
         self._active_connections = 0
@@ -80,13 +91,21 @@ class Listener:
 
         self._active_connections += 1
         try:
-            conn = await accept(
-                self.identity, reader, writer,
-                supported_protocols=self.supported_protocols,
+            conn = await asyncio.wait_for(
+                accept(
+                    self.identity, reader, writer,
+                    supported_protocols=self.supported_protocols,
+                ),
+                timeout=self.handshake_timeout,
             )
             log.info(f"accepted connection from {remote}, peer {conn.remote_peer_id.hex()[:16]}...")
             if self.on_connection:
                 await self.on_connection(conn)
+        except asyncio.TimeoutError:
+            log.warning(
+                f"handshake timeout from {remote} after {self.handshake_timeout}s"
+            )
+            writer.close()
         except Exception as e:
             log.warning(f"failed to accept connection from {remote}: {e}")
             writer.close()

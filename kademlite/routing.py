@@ -6,11 +6,17 @@
 Reference: https://github.com/libp2p/specs/blob/master/kad-dht/README.md
 
 The routing table organizes peers into K-buckets based on XOR distance from
-the local node's peer ID. Each bucket holds up to K peers (default 20).
-Buckets are indexed by the number of leading zero bits in the XOR distance,
-giving 256 buckets for SHA-256-based peer IDs.
+the local node's peer ID, computed in the Kademlia keyspace. Per the libp2p
+kad-dht spec, the metric is XOR(sha256(a), sha256(b)) - peer IDs and record
+keys are hashed into a 32-byte keyspace before XOR. Use ``kad_key()`` to
+transform an identifier into its keyspace representation; ``xor_distance``
+and ``_common_prefix_length`` operate on the resulting raw bytes.
+
+Each bucket holds up to K peers (default 20). Buckets are indexed by the
+number of leading zero bits in the XOR distance, giving 256 buckets.
 """
 
+import hashlib
 import logging
 import random
 import time
@@ -43,8 +49,27 @@ class PeerEntry:
         self.connected: bool = True
 
 
+def kad_key(identifier: bytes) -> bytes:
+    """Hash a peer ID or record key into the Kademlia keyspace.
+
+    Per the libp2p kad-dht spec, distance between two identifiers is
+    ``XOR(sha256(a), sha256(b))``, not raw XOR of the underlying bytes.
+    This wraps the SHA-256 transformation so call sites that compute
+    routing distances or bucket indices can stay in the keyspace.
+
+    Matches rust-libp2p's ``kbucket::Key`` and go-libp2p-kbucket's
+    ``XORKeySpace.Key`` transformations.
+    """
+    return hashlib.sha256(identifier).digest()
+
+
 def xor_distance(a: bytes, b: bytes) -> int:
-    """Compute XOR distance between two peer IDs as an integer."""
+    """Compute XOR distance between two raw byte strings as an integer.
+
+    This is the bare XOR-distance primitive operating on whatever bytes
+    are passed in. Most call sites should pass keyspace-transformed
+    identifiers via ``kad_key()`` to match the kad-dht spec.
+    """
     # Pad to same length
     max_len = max(len(a), len(b))
     a_padded = a.ljust(max_len, b"\x00")
@@ -250,12 +275,17 @@ class RoutingTable:
         is_alive: Callable[[bytes], bool] | None = None,
     ):
         self.local_peer_id = local_peer_id
+        self._local_kad_id = kad_key(local_peer_id)
         self.k = k
         self._buckets = [KBucket(k, is_alive=is_alive) for _ in range(256)]
 
     def _bucket_index(self, peer_id: bytes) -> int:
-        """Determine which bucket a peer belongs in."""
-        cpl = _common_prefix_length(self.local_peer_id, peer_id)
+        """Determine which bucket a peer belongs in.
+
+        Uses the kad-dht keyspace metric: bucket = CPL of XOR over the
+        SHA-256 hashes of the local and remote peer IDs.
+        """
+        cpl = _common_prefix_length(self._local_kad_id, kad_key(peer_id))
         return min(cpl, 255)
 
     def add_or_update(self, peer_id: bytes, addrs: list[bytes]) -> bool:
@@ -291,8 +321,9 @@ class RoutingTable:
     def closest_peers(
         self, target: bytes, count: int = K, connected_only: bool = False
     ) -> list[PeerEntry]:
-        """Return up to `count` peers closest to `target` by XOR distance.
+        """Return up to ``count`` peers closest to ``target`` in the Kad keyspace.
 
+        Distance is XOR(sha256(peer_id), sha256(target)) per the kad-dht spec.
         When connected_only is True, only peers marked as connected are returned.
         """
         all_peers = []
@@ -302,7 +333,8 @@ class RoutingTable:
         if connected_only:
             all_peers = [p for p in all_peers if p.connected]
 
-        all_peers.sort(key=lambda p: xor_distance(p.peer_id, target))
+        target_kad = kad_key(target)
+        all_peers.sort(key=lambda p: xor_distance(kad_key(p.peer_id), target_kad))
         return all_peers[:count]
 
     def size(self) -> int:

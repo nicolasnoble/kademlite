@@ -19,7 +19,6 @@ from .multiaddr import (
     encode_multiaddr_ip_tcp_p2p,
     parse_multiaddr_string,
 )
-from .routing import K
 from .slurm import expand_hostlist
 
 log = logging.getLogger(__name__)
@@ -115,7 +114,7 @@ class BootstrapMixin:
         """Dial a list of IPs concurrently with bounded parallelism.
 
         Shared implementation for DNS and SLURM bootstrap. Filters out our
-        own IPs, dials up to K peers, learns peer IDs via Noise handshake,
+        own IPs, dials up to k peers, learns peer IDs via Noise handshake,
         and performs Identify exchange + self-lookup.
         """
         # Filter out our own IPs (both listen and observed, since they can differ)
@@ -139,11 +138,16 @@ class BootstrapMixin:
 
         async def dial_one(ip: str) -> bool:
             nonlocal connected
-            if connected >= K:
-                return False
-            async with sem:
-                if connected >= K:
+            # Atomically reserve a slot under the lock: check-and-reserve
+            # in one critical section so concurrent dial_one tasks can't
+            # all pass an early check and overshoot k. The reservation is
+            # released on failure inside the dial path.
+            async with lock:
+                if connected >= self._k:
                     return False
+                connected += 1
+            async with sem:
+                ok = False
                 try:
                     conn = await asyncio.wait_for(
                         dial(
@@ -176,16 +180,23 @@ class BootstrapMixin:
                         self.routing_table.add_or_update(peer_id, routable)
                         self.peer_store.replace_addrs(peer_id, routable)
 
-                    async with lock:
-                        connected += 1
                     peer_short = peer_id.hex()[:16]
                     log.info(
                         f"{label} bootstrap: connected to {ip}:{port} (peer {peer_short}...)"
                     )
+                    ok = True
                     return True
                 except Exception as e:
                     log.debug(f"{label} bootstrap: failed to dial {ip}:{port}: {e}")
                     return False
+                finally:
+                    # Release the reserved slot on any non-success exit
+                    # (regular Exception, asyncio.CancelledError, anything).
+                    # asyncio.CancelledError is a BaseException, not Exception,
+                    # so the except clause above wouldn't catch it.
+                    if not ok:
+                        async with lock:
+                            connected -= 1
 
         await asyncio.gather(*(dial_one(ip) for ip in ips))
         log.info(f"{label} bootstrap: connected to {connected}/{len(ips)} peers")

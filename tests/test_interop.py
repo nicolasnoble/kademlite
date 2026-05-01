@@ -422,21 +422,36 @@ async def test_mixed_cluster(interop_binary):
         await py_a.start("127.0.0.1", 0)
         addr_a = node_multiaddr(py_a)
 
+        # The interop node dials py_a first so the python side learns about
+        # it via Identify. py_b then bootstraps to BOTH py_a AND the interop
+        # node directly: that way py_b's routing table includes the interop
+        # node as a primary peer rather than relying on closer-peer hints
+        # from py_a (which may or may not surface the interop node depending
+        # on iterative-lookup ordering and replication placement).
         with InteropNode(
             binary_path, "put", "/test/from-node",
-            json.dumps({"origin": lang}), timeout_secs=30,
-        ):
+            json.dumps({"origin": lang}),
+            peer=addr_a,
+            timeout_secs=30,
+        ) as remote:
             await asyncio.sleep(1.0)
 
-            await py_b.start("127.0.0.1", 0, bootstrap_peers=[addr_a])
+            await py_b.start(
+                "127.0.0.1", 0,
+                bootstrap_peers=[addr_a, remote.full_addr],
+            )
             await asyncio.sleep(0.5)
 
             await py_a.put(b"/test/from-py-a", b'{"origin": "python-a"}')
             await py_b.put(b"/test/from-py-b", b'{"origin": "python-b"}')
 
-            await asyncio.wait_for(
+            result_from_node = await asyncio.wait_for(
                 py_b.get(b"/test/from-node"), timeout=10.0
             )
+            assert result_from_node is not None, (
+                f"Python B couldn't GET /test/from-node put by {lang} reference"
+            )
+            assert json.loads(result_from_node) == {"origin": lang}
 
             result_a = await asyncio.wait_for(
                 py_a.get(b"/test/from-py-b"), timeout=10.0

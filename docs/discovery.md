@@ -289,7 +289,8 @@ store and routing table store. The multiaddr functions in
 
 | Constant | Value | Where |
 |---|---|---|
-| `K` (k-bucket size) | 20 | `routing.py` |
+| `K` (k-bucket size, default) | 20 | `routing.py` (override per-node via `DhtNode(k=...)`) |
+| `ALPHA` (lookup parallelism, default) | 3 | `routing.py` (override per-node via `DhtNode(alpha=...)`) |
 | Bootstrap dial concurrency | 20 | `dht_bootstrap.py` |
 | `BOOTSTRAP_INTERVAL` | 300 s | `dht_maintenance.py` |
 | `republish_interval` (default) | 3600 s | `dht.py` |

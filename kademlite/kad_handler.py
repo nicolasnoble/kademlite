@@ -25,7 +25,7 @@ from .kademlia import (
     encode_peer,
     encode_record,
 )
-from .routing import RoutingTable, xor_distance
+from .routing import RoutingTable, kad_key, xor_distance
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +74,7 @@ class KadHandler:
         max_record_size: int = MAX_RECORD_VALUE_SIZE,
         max_records: int = MAX_RECORDS,
         record_filter=None,
+        k: int | None = None,
     ):
         """
         Args:
@@ -84,12 +85,16 @@ class KadHandler:
                 If provided, inbound PUT_VALUE records are only accepted when
                 this returns True. Enables application-level validation (e.g.
                 key namespace checks, value schema validation).
+            k: replication factor for inbound FIND_NODE / GET_VALUE responses.
+                Defaults to the routing table's k so inbound and outbound widths
+                stay consistent for a given node.
         """
         self.routing_table = routing_table
         self._records: dict[bytes, StoredRecord] = {}  # key -> StoredRecord
         self._max_record_size = max_record_size
         self._max_records = max_records
         self._record_filter = record_filter
+        self._k = k if k is not None else routing_table.k
 
     @property
     def records(self) -> dict[bytes, StoredRecord]:
@@ -123,16 +128,17 @@ class KadHandler:
     def _evict_furthest(self, incoming_key: bytes) -> None:
         """Evict the record whose key is furthest from our peer ID.
 
+        Distance is measured in the Kad keyspace (sha256 of both inputs).
         If the incoming key is further than all existing keys, it is not
         stored (the caller should handle this, but in practice we always
         evict because the incoming record is presumably closer to us or
         equally important).
         """
-        local_id = self.routing_table.local_peer_id
+        local_kad_id = kad_key(self.routing_table.local_peer_id)
         furthest_key = None
         furthest_dist = -1
         for k in self._records:
-            d = xor_distance(k, local_id)
+            d = xor_distance(kad_key(k), local_kad_id)
             if d > furthest_dist:
                 furthest_dist = d
                 furthest_key = k
@@ -161,8 +167,17 @@ class KadHandler:
             del self._records[k]
         return len(expired)
 
-    def _closest_peers_encoded(self, target: bytes, count: int = 20) -> list[bytes]:
-        """Return closest peers as encoded Peer protobufs."""
+    def _closest_peers_encoded(self, target: bytes, count: int | None = None) -> list[bytes]:
+        """Return closest peers as encoded Peer protobufs.
+
+        Args:
+            target: key or peer ID to find peers closest to.
+            count: maximum number of peers to return. Defaults to this
+                handler's configured k so inbound responses honor the node's
+                replication factor.
+        """
+        if count is None:
+            count = self._k
         entries = self.routing_table.closest_peers(target, count)
         result = []
         for entry in entries:

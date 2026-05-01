@@ -221,3 +221,157 @@ def test_prune_methods_handle_empty_routing_table() -> None:
     node._prune_dead_peers()
     node._quick_prune()
     assert rt.removed == []
+
+
+# ---------------------------------------------------------------------------
+# _periodic_bootstrap_tick (added 2026-05-01 to cover commit e168934 -
+# "prune before sampling routing-table size in periodic bootstrap")
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+
+
+class _SizeAwareRoutingTable(_StubRoutingTable):
+    """Adds size() and remembers when it was first called, so the test
+    can assert sampling happens AFTER prune."""
+
+    def __init__(self, entries):
+        super().__init__(entries)
+        self.size_call_log: list[int] = []  # remaining-entry counts at each size() call
+        self.first_size_observed_at: int | None = None
+
+    def size(self) -> int:
+        n = len(self._entries)
+        self.size_call_log.append(n)
+        return n
+
+
+class _TickNode:
+    """Stub that supports _periodic_bootstrap_tick.
+
+    Records every call so tests can assert ordering and decision logic.
+    """
+
+    def __init__(
+        self,
+        routing_table: _SizeAwareRoutingTable,
+        peer_store: _StubPeerStore,
+        k: int = 5,
+        bootstrap_peers=None,
+    ) -> None:
+        self.routing_table = routing_table
+        self.peer_store = peer_store
+        self._k = k
+        self._bootstrap_peers = bootstrap_peers or []
+        self._bootstrap_dns = None
+        self._bootstrap_dns_port = 4001
+        self._bootstrap_hostlist = None
+        self._mdns = None
+        # Call log for assertions
+        self.calls: list[tuple[str, int]] = []
+        # peer_id used for self-lookup
+        self.peer_id = b"\x00" * 32
+
+    _quick_prune = MaintenanceMixin._quick_prune
+    _periodic_bootstrap_tick = MaintenanceMixin._periodic_bootstrap_tick
+
+    async def bootstrap(self, peers):
+        self.calls.append(("bootstrap", len(peers)))
+
+    async def bootstrap_from_dns(self, dns, port):
+        self.calls.append(("bootstrap_from_dns", 0))
+
+    async def bootstrap_from_hostlist(self, hostlist, port):
+        self.calls.append(("bootstrap_from_hostlist", 0))
+
+    async def _iterative_find_node(self, target):
+        self.calls.append(("self_lookup", 0))
+        return []
+
+    async def _refresh_buckets(self):
+        self.calls.append(("refresh_buckets", 0))
+
+
+def test_periodic_bootstrap_tick_prunes_before_sampling_size() -> None:
+    """The tick must run _quick_prune BEFORE reading routing_table.size()
+    so the bootstrap decision reflects reachable peers, not stale ones.
+
+    Regression: prior to e168934, size was sampled first, so a routing
+    table that pruning would drop below k stayed inflated for the
+    duration of the bootstrap-decision branch.
+    """
+    # 6 entries total; 4 are dead (disconnected, no live conn) and will be pruned.
+    # k=5 so post-prune size (2) < k -> bootstrap path expected.
+    # Pre-prune size (6) > k -> would have taken self-lookup path under the bug.
+    entries = [
+        _StubEntry(b"alive-1", connected=True),
+        _StubEntry(b"alive-2", connected=True),
+        _StubEntry(b"dead-1", connected=False),
+        _StubEntry(b"dead-2", connected=False),
+        _StubEntry(b"dead-3", connected=False),
+        _StubEntry(b"dead-4", connected=False),
+    ]
+    rt = _SizeAwareRoutingTable(entries)
+    ps = _StubPeerStore({e.peer_id: None for e in entries})
+    node = _TickNode(rt, ps, k=5, bootstrap_peers=["/ip4/1.2.3.4/tcp/4001"])
+
+    asyncio.run(node._periodic_bootstrap_tick())
+
+    # size() was called exactly once, after prune dropped the dead peers.
+    assert rt.size_call_log == [2], (
+        f"size() should have been called exactly once after prune; "
+        f"observed call log: {rt.size_call_log}"
+    )
+    # Bootstrap path was taken because post-prune size (2) < k (5).
+    assert ("bootstrap", 1) in node.calls, (
+        f"bootstrap should have been called with the configured peers; "
+        f"actual calls: {node.calls}"
+    )
+    # Self-lookup should NOT fire on the sparse path.
+    assert ("self_lookup", 0) not in node.calls, (
+        f"self_lookup should not run on the sparse-table branch; "
+        f"actual calls: {node.calls}"
+    )
+    # Refresh always runs at the end.
+    assert node.calls[-1] == ("refresh_buckets", 0)
+
+
+def test_periodic_bootstrap_tick_self_lookup_when_healthy() -> None:
+    """When the post-prune table is at or above k, the tick takes the
+    self-lookup branch instead of re-dialing bootstrap peers."""
+    entries = [
+        _StubEntry(b"alive-1", connected=True),
+        _StubEntry(b"alive-2", connected=True),
+        _StubEntry(b"alive-3", connected=True),
+    ]
+    rt = _SizeAwareRoutingTable(entries)
+    ps = _StubPeerStore({e.peer_id: None for e in entries})
+    node = _TickNode(rt, ps, k=2, bootstrap_peers=["/ip4/1.2.3.4/tcp/4001"])
+
+    asyncio.run(node._periodic_bootstrap_tick())
+
+    assert rt.size_call_log == [3]
+    # Self-lookup fired, bootstrap did not.
+    assert ("self_lookup", 0) in node.calls
+    assert ("bootstrap", 1) not in node.calls
+    # Refresh always runs at the end.
+    assert node.calls[-1] == ("refresh_buckets", 0)
+
+
+def test_periodic_bootstrap_tick_empty_table_takes_neither_branch() -> None:
+    """A fully-empty post-prune table should re-bootstrap (size 0 < k)
+    and skip the self-lookup elif branch.
+    """
+    entries = [
+        _StubEntry(b"dead-1", connected=False),
+        _StubEntry(b"dead-2", connected=False),
+    ]
+    rt = _SizeAwareRoutingTable(entries)
+    ps = _StubPeerStore({e.peer_id: None for e in entries})
+    node = _TickNode(rt, ps, k=5, bootstrap_peers=["/ip4/1.2.3.4/tcp/4001"])
+
+    asyncio.run(node._periodic_bootstrap_tick())
+
+    assert rt.size_call_log == [0]
+    assert ("bootstrap", 1) in node.calls
+    assert ("self_lookup", 0) not in node.calls
