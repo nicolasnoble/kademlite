@@ -258,7 +258,8 @@ async def accept(
     except BaseException:
         # accept() doesn't own the TCP writer (the listener does), so
         # we don't close it here - the listener's _handle_connection
-        # already handles writer.close() in its except branch.
+        # closes the writer in its finally block on every non-success
+        # path (including external cancellation).
         await _cleanup_partial_handshake(None, noise, yamux)
         raise
 

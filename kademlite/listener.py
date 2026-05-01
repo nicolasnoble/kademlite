@@ -91,6 +91,7 @@ class Listener:
 
         self._active_connections += 1
         accept_succeeded = False
+        conn: Connection | None = None
         try:
             conn = await asyncio.wait_for(
                 accept(
@@ -99,10 +100,15 @@ class Listener:
                 ),
                 timeout=self.handshake_timeout,
             )
-            accept_succeeded = True
             log.info(f"accepted connection from {remote}, peer {conn.remote_peer_id.hex()[:16]}...")
             if self.on_connection:
                 await self.on_connection(conn)
+            # Only mark success AFTER on_connection completes - if the
+            # callback raises, the Connection is fully established
+            # (yamux read loop + stream tasks running) but no caller has
+            # taken ownership, so we need to tear it down ourselves
+            # rather than skipping cleanup.
+            accept_succeeded = True
         except asyncio.TimeoutError:
             log.warning(
                 f"handshake timeout from {remote} after {self.handshake_timeout}s"
@@ -110,21 +116,31 @@ class Listener:
         except Exception as e:
             log.warning(f"failed to accept connection from {remote}: {e}")
         finally:
-            # Close the writer on every non-success path including
-            # external cancellation of _handle_connection itself, and
-            # ALWAYS decrement _active_connections - if cancellation
-            # lands inside writer.wait_closed, we'd otherwise leak the
-            # listener slot forever, defeating the whole point of the
-            # max_connections cap.
+            # Cleanup on every non-success path including external
+            # cancellation. ALWAYS decrement _active_connections - if
+            # cancellation lands inside the cleanup awaits, we'd
+            # otherwise leak the listener slot forever.
             try:
                 if not accept_succeeded:
-                    try:
-                        writer.close()
-                        # Wait for the underlying transport to actually
-                        # drain. Best-effort: failures here just mean
-                        # the OS gets to clean up later.
-                        await writer.wait_closed()
-                    except Exception as e:
-                        log.debug(f"writer.close/wait_closed during cleanup raised: {e}")
+                    if conn is not None:
+                        # accept() returned but on_connection raised
+                        # (or external cancellation landed there).
+                        # The Connection owns the writer/noise/yamux
+                        # at this point, so close() handles the full
+                        # teardown - calling writer.close() ourselves
+                        # would conflict with Connection's resources.
+                        try:
+                            await conn.close()
+                        except Exception as e:
+                            log.debug(f"conn.close during accept cleanup raised: {e}")
+                    else:
+                        # accept() never returned - the writer is still
+                        # ours to close. Best-effort: failures here just
+                        # mean the OS cleans up later.
+                        try:
+                            writer.close()
+                            await writer.wait_closed()
+                        except Exception as e:
+                            log.debug(f"writer.close/wait_closed during cleanup raised: {e}")
             finally:
                 self._active_connections -= 1

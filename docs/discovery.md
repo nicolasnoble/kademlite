@@ -98,15 +98,20 @@ steps before `start()` returns:
    that the bootstrap dials' transitive routing tables know about.
 2. **Per-CPL bucket refresh** (added in v0.3.0, default on): one round
    of `_refresh_buckets()` that runs an iterative `FIND_NODE` against
-   a randomly chosen target in each non-empty bucket beyond the
-   closest-neighbor bucket. This is the join procedure from the
-   original Kademlia paper (Maymounkov & Mazieres 2002) and matches
-   rust-libp2p's synchronous bootstrap behavior. Without it, a cold
-   consumer that PUTs/GETs immediately after `start()` operates against
-   a routing table populated only by the closest-neighbor bucket plus
-   whatever the self-lookup discovered transitively, so PUTs/GETs
-   against keys in distant buckets fail until the 5-minute maintenance
-   loop fires its own refresh.
+   a randomly chosen target in each non-empty bucket. The original
+   Kademlia paper (Maymounkov & Mazieres 2002) specifies refreshing
+   buckets "farther than the closest neighbor" - kademlite refreshes
+   all non-empty buckets including the closest, which is slightly
+   more work than the paper's join procedure but produces the same
+   correct routing table (the closest bucket is also touched by the
+   self-lookup, so the duplicate work is bounded). rust-libp2p
+   chains its per-bucket walks into the bootstrap QueryId for
+   similar synchronous-readiness behavior. Without this step, a
+   cold consumer that PUTs/GETs immediately after `start()` operates
+   against a routing table populated only by the closest-neighbor
+   bucket plus whatever the self-lookup discovered transitively, so
+   PUTs/GETs against keys in distant buckets fail until the 5-minute
+   maintenance loop fires its own refresh.
 
 Opt out via `DhtNode.start(wait_until_routable=False)` if the per-CPL
 walks add unwanted latency (tests, constrained startups). The
