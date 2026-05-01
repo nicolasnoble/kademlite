@@ -35,7 +35,7 @@ from .multiaddr import (
     multiaddr_to_string,
 )
 from .peer_store import PeerStore
-from .routing import RoutingTable
+from .routing import ALPHA, K, RoutingTable
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +64,8 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
         rpc_timeout: float = RPC_TIMEOUT,
         dial_timeout: float = DIAL_TIMEOUT,
         record_filter=None,
+        k: int = K,
+        alpha: int = ALPHA,
     ):
         """
         Args:
@@ -75,12 +77,24 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
             record_filter: optional callable(key: bytes, value: bytes) -> bool.
                 If provided, inbound PUT_VALUE records are only accepted when
                 this returns True. Useful for key namespace or value schema validation.
+            k: replication factor and bucket size (default 20). Determines how
+                many closest peers a record is replicated to and how many peers
+                each k-bucket holds. Matches the libp2p kad-dht spec's `k`.
+            alpha: parallelism factor for iterative lookups (default 3). Number
+                of concurrent FIND_NODE / GET_VALUE requests per round. Matches
+                the libp2p kad-dht spec's `alpha`.
         """
+        if k <= 0:
+            raise ValueError(f"k must be positive, got {k}")
+        if alpha <= 0:
+            raise ValueError(f"alpha must be positive, got {alpha}")
         self.identity = identity or Ed25519Identity.generate()
         self.record_ttl = record_ttl
         self.republish_interval = republish_interval
         self.rpc_timeout = rpc_timeout
         self.dial_timeout = dial_timeout
+        self._k = k
+        self._alpha = alpha
         self._observed_ip: str | None = None
         self._observed_ip_votes: dict[str, int] = {}  # ip -> vote count
         # Number of confirmations needed before accepting an observed IP.
@@ -98,6 +112,7 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
         # Routing table uses connection liveness to decide eviction
         self.routing_table = RoutingTable(
             self.identity.peer_id,
+            k=self._k,
             is_alive=lambda pid: self.peer_store.get_connection(pid) is not None,
         )
         self.kad_handler = KadHandler(self.routing_table, record_filter=record_filter)
@@ -118,6 +133,16 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
     @property
     def peer_id_short(self) -> str:
         return self.identity.peer_id.hex()[:16]
+
+    @property
+    def k(self) -> int:
+        """Replication factor and bucket size for this node."""
+        return self._k
+
+    @property
+    def alpha(self) -> int:
+        """Lookup parallelism for this node."""
+        return self._alpha
 
     @property
     def listen_addr(self) -> tuple[str, int] | None:

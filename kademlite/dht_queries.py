@@ -11,7 +11,7 @@ import asyncio
 import logging
 
 from .kademlia import kad_find_node, kad_get_value, kad_put_value
-from .routing import ALPHA, K, xor_distance
+from .routing import xor_distance
 
 log = logging.getLogger(__name__)
 
@@ -35,14 +35,14 @@ class QueryMixin:
     async def _iterative_find_node(self, target: bytes) -> list[tuple[bytes, list[bytes]]]:
         """Iterative FIND_NODE lookup with stall detection.
 
-        Returns list of (peer_id, addrs) for the K closest peers found.
+        Returns list of (peer_id, addrs) for the k closest peers found.
 
         When no new closer peers are discovered in a round (stall), the
         parallelism is increased to query more peers simultaneously. This
         matches rust-libp2p's adaptive approach to query termination.
         """
         # Seed with locally known closest peers
-        closest = self.routing_table.closest_peers(target, K)
+        closest = self.routing_table.closest_peers(target, self._k)
         if not closest:
             return []
 
@@ -53,7 +53,7 @@ class QueryMixin:
         for entry in closest:
             peer_map[entry.peer_id] = entry.addrs
 
-        parallelism = ALPHA
+        parallelism = self._alpha
         stall_count = 0
 
         for _round in range(MAX_LOOKUP_ROUNDS):
@@ -99,14 +99,14 @@ class QueryMixin:
                     # Two consecutive stalls: query is converged
                     break
                 # First stall: boost parallelism to try harder
-                parallelism = min(ALPHA * STALL_PARALLELISM_BOOST, K)
+                parallelism = min(self._alpha * STALL_PARALLELISM_BOOST, self._k)
             else:
                 stall_count = 0
-                parallelism = ALPHA
+                parallelism = self._alpha
 
-        # Return K closest
+        # Return k closest
         sorted_peers = sorted(peer_map.keys(), key=lambda p: xor_distance(p, target))
-        return [(p, peer_map[p]) for p in sorted_peers[:K]]
+        return [(p, peer_map[p]) for p in sorted_peers[:self._k]]
 
     async def _find_node_single(
         self, peer_id: bytes, addrs: list[bytes], target: bytes
@@ -140,7 +140,7 @@ class QueryMixin:
         Walks peers progressively closer to the key, stopping when a record
         is found or all closest peers have been queried.
         """
-        closest = self.routing_table.closest_peers(key, K)
+        closest = self.routing_table.closest_peers(key, self._k)
         if not closest:
             return None
 
@@ -156,7 +156,7 @@ class QueryMixin:
             to_query = [
                 p for p in candidates
                 if p not in queried and self._is_peer_reachable(p)
-            ][:ALPHA]
+            ][:self._alpha]
 
             if not to_query:
                 break

@@ -19,7 +19,6 @@ from .multiaddr import (
     encode_multiaddr_ip_tcp_p2p,
     parse_multiaddr_string,
 )
-from .routing import K
 from .slurm import expand_hostlist
 
 log = logging.getLogger(__name__)
@@ -115,7 +114,7 @@ class BootstrapMixin:
         """Dial a list of IPs concurrently with bounded parallelism.
 
         Shared implementation for DNS and SLURM bootstrap. Filters out our
-        own IPs, dials up to K peers, learns peer IDs via Noise handshake,
+        own IPs, dials up to k peers, learns peer IDs via Noise handshake,
         and performs Identify exchange + self-lookup.
         """
         # Filter out our own IPs (both listen and observed, since they can differ)
@@ -139,10 +138,10 @@ class BootstrapMixin:
 
         async def dial_one(ip: str) -> bool:
             nonlocal connected
-            if connected >= K:
+            if connected >= self._k:
                 return False
             async with sem:
-                if connected >= K:
+                if connected >= self._k:
                     return False
                 try:
                     conn = await asyncio.wait_for(

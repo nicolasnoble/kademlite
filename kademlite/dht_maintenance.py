@@ -11,8 +11,6 @@ import asyncio
 import logging
 import os
 
-from .routing import K
-
 log = logging.getLogger(__name__)
 
 # Periodic bootstrap interval: 5 minutes (matches rust-libp2p)
@@ -64,11 +62,11 @@ class MaintenanceMixin:
                 # sparse-table check reflects actual reachable peers.
                 self._quick_prune()
 
-                if size < K:
+                if size < self._k:
                     # Sparse table: re-dial bootstrap peers first
                     log.info(
                         f"periodic re-bootstrap: routing table has "
-                        f"{size} peers (< K={K}), re-dialing bootstrap peers"
+                        f"{size} peers (< k={self._k}), re-dialing bootstrap peers"
                     )
                     if self._bootstrap_peers:
                         await self.bootstrap(self._bootstrap_peers)
