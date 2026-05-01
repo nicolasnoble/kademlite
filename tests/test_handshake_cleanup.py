@@ -154,8 +154,11 @@ async def test_connection_close_orders_yamux_before_noise() -> None:
         def close(self):
             call_order.append("noise.close")
 
+    # Connection.__init__ types identity as Ed25519Identity; pass a real
+    # one (cheap to generate) rather than None, so future code that
+    # relies on the field doesn't break this test silently.
     conn = Connection(
-        identity=None,
+        identity=Ed25519Identity.generate(),
         noise=_FakeNoise(),
         yamux=_FakeYamux(),
         remote_peer_id=b"\x00" * 32,

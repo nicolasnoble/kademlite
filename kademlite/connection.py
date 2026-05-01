@@ -293,13 +293,17 @@ async def _cleanup_partial_handshake(
     would skip noise.close and writer.close - the exact leak the helper
     exists to prevent.
     """
-    cancelled_during_cleanup = False
+    # Capture the first CancelledError instance (not just the fact)
+    # so we preserve the original cancellation message/context that
+    # Task.cancel(msg) attaches on Python 3.11+. Re-raising a fresh
+    # CancelledError() would drop that metadata.
+    cancelled_during_cleanup: asyncio.CancelledError | None = None
 
     if yamux is not None:
         try:
             await yamux.stop()
-        except asyncio.CancelledError:
-            cancelled_during_cleanup = True
+        except asyncio.CancelledError as exc:
+            cancelled_during_cleanup = cancelled_during_cleanup or exc
             log.debug("yamux.stop cancelled during partial-handshake cleanup; continuing teardown")
         except Exception as e:
             log.debug(f"yamux.stop during partial-handshake cleanup raised: {e}")
@@ -320,15 +324,16 @@ async def _cleanup_partial_handshake(
             # in tests. Best-effort: failures here just mean the OS
             # cleans up later.
             await writer.wait_closed()
-        except asyncio.CancelledError:
-            cancelled_during_cleanup = True
+        except asyncio.CancelledError as exc:
+            cancelled_during_cleanup = cancelled_during_cleanup or exc
             log.debug("writer.wait_closed cancelled during partial-handshake cleanup")
         except Exception as e:
             log.debug(f"writer.close during partial-handshake cleanup raised: {e}")
 
-    if cancelled_during_cleanup:
-        # Surface the cancellation now that all cleanup steps have run.
-        raise asyncio.CancelledError()
+    if cancelled_during_cleanup is not None:
+        # Surface the original cancellation (with its message/context)
+        # now that all cleanup steps have run.
+        raise cancelled_during_cleanup
 
 
 def _stream_to_rw(stream: YamuxStream) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:

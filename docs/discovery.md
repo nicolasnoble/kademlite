@@ -90,8 +90,13 @@ Concretely:
   candidate IP). The observed address feeds the IP voting described
   below.
 
-After all bootstrap dials have run, the node performs two convergence
-steps before `start()` returns:
+After bootstrap dials have run, the node may perform up to two
+convergence steps before `start()` returns. Both are conditional on
+the routing table being non-empty - if every bootstrap dial failed
+(or the node started without any bootstrap configured) both steps
+are skipped, and convergence happens later: via the maintenance loop
+on its 5-minute cadence, or for mDNS-only nodes via a one-shot
+refresh fired by the first discovered peer.
 
 1. **Self-lookup**: one iterative `FIND_NODE(self.peer_id)`. This
    populates the K-buckets near the local node by pulling in peers
@@ -117,8 +122,12 @@ Opt out via `DhtNode.start(wait_until_routable=False)` if the per-CPL
 walks add unwanted latency (tests, constrained startups). The
 maintenance loop's periodic refresh still runs on its 5-minute cadence.
 For caller-driven readiness after `start(wait_until_routable=False)`,
-call `await node.wait_until_routable()` to run one round of refresh
-before issuing the first PUT/GET.
+call `await node.wait_until_routable()` before the first PUT/GET. If
+the routing table is still empty when called, this is a no-op rather
+than a hang - so callers waiting for first-peer arrival from mDNS or
+a delayed bootstrap should poll the routing table size or use the
+node's existing peer-arrival hooks instead of relying on
+`wait_until_routable()` to block.
 
 ## Why bounded
 
