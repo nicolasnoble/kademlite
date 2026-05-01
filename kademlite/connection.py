@@ -282,17 +282,34 @@ async def _cleanup_partial_handshake(
     encrypted state and an open transport), then writer (the raw TCP
     socket). Yamux.stop sends GO_AWAY which needs the noise transport
     alive, so noise must outlive yamux teardown.
+
+    Cancellation safety: dial() / accept() catch BaseException to also
+    invoke this helper on caller-task cancellation. If the cancellation
+    lands during one of our awaits (yamux.stop, writer.wait_closed),
+    we catch CancelledError, finish the remaining cleanup steps, and
+    re-raise CancelledError at the end so the caller's cancellation
+    contract still holds. Without this, a cancellation mid-yamux.stop
+    would skip noise.close and writer.close - the exact leak the helper
+    exists to prevent.
     """
+    cancelled_during_cleanup = False
+
     if yamux is not None:
         try:
             await yamux.stop()
+        except asyncio.CancelledError:
+            cancelled_during_cleanup = True
+            log.debug("yamux.stop cancelled during partial-handshake cleanup; continuing teardown")
         except Exception as e:
             log.debug(f"yamux.stop during partial-handshake cleanup raised: {e}")
+
     if noise is not None:
+        # noise.close is synchronous; no cancellation surface here.
         try:
             noise.close()
         except Exception as e:
             log.debug(f"noise.close during partial-handshake cleanup raised: {e}")
+
     if writer is not None:
         try:
             writer.close()
@@ -302,8 +319,15 @@ async def _cleanup_partial_handshake(
             # in tests. Best-effort: failures here just mean the OS
             # cleans up later.
             await writer.wait_closed()
+        except asyncio.CancelledError:
+            cancelled_during_cleanup = True
+            log.debug("writer.wait_closed cancelled during partial-handshake cleanup")
         except Exception as e:
             log.debug(f"writer.close during partial-handshake cleanup raised: {e}")
+
+    if cancelled_during_cleanup:
+        # Surface the cancellation now that all cleanup steps have run.
+        raise asyncio.CancelledError()
 
 
 def _stream_to_rw(stream: YamuxStream) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:

@@ -116,8 +116,13 @@ async def test_connection_close_cancels_pending_stream_tasks() -> None:
                 "Connection.close() should have cancelled the pending "
                 "stream task; task is still running"
             )
-            assert t.cancelled() or isinstance(t.exception(), asyncio.CancelledError), (
-                f"task should have been cancelled, got: {t.exception()}"
+            # Use t.cancelled() exclusively - calling t.exception() on
+            # a cancelled task RAISES CancelledError instead of
+            # returning it, so the previous `isinstance(t.exception(),
+            # CancelledError)` branch was structurally unsound.
+            assert t.cancelled(), (
+                f"task should have been cancelled by Connection.close(); "
+                f"instead it completed with done={t.done()} cancelled={t.cancelled()}"
             )
         finally:
             await node_b.stop()
