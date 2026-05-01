@@ -90,6 +90,7 @@ class Listener:
             return
 
         self._active_connections += 1
+        accept_succeeded = False
         try:
             conn = await asyncio.wait_for(
                 accept(
@@ -98,6 +99,7 @@ class Listener:
                 ),
                 timeout=self.handshake_timeout,
             )
+            accept_succeeded = True
             log.info(f"accepted connection from {remote}, peer {conn.remote_peer_id.hex()[:16]}...")
             if self.on_connection:
                 await self.on_connection(conn)
@@ -105,9 +107,24 @@ class Listener:
             log.warning(
                 f"handshake timeout from {remote} after {self.handshake_timeout}s"
             )
-            writer.close()
         except Exception as e:
             log.warning(f"failed to accept connection from {remote}: {e}")
-            writer.close()
         finally:
+            # Close the writer on every non-success path including
+            # external cancellation of _handle_connection itself.
+            # asyncio.CancelledError is a BaseException (not Exception)
+            # so the previous structure with two except clauses skipped
+            # writer.close on cancellation - the writer leaked, which
+            # contradicts the listener-owns-writer assumption that
+            # Connection.accept() relies on.
+            if not accept_succeeded:
+                try:
+                    writer.close()
+                    # Wait for the underlying transport to actually drain
+                    # so the slot is released before we decrement the
+                    # active counter. Best-effort: failures here just
+                    # mean the OS gets to clean up later.
+                    await writer.wait_closed()
+                except Exception as e:
+                    log.debug(f"writer.close/wait_closed during cleanup raised: {e}")
             self._active_connections -= 1
