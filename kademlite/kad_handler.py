@@ -74,6 +74,7 @@ class KadHandler:
         max_record_size: int = MAX_RECORD_VALUE_SIZE,
         max_records: int = MAX_RECORDS,
         record_filter=None,
+        k: int | None = None,
     ):
         """
         Args:
@@ -84,12 +85,16 @@ class KadHandler:
                 If provided, inbound PUT_VALUE records are only accepted when
                 this returns True. Enables application-level validation (e.g.
                 key namespace checks, value schema validation).
+            k: replication factor for inbound FIND_NODE / GET_VALUE responses.
+                Defaults to the routing table's k so inbound and outbound widths
+                stay consistent for a given node.
         """
         self.routing_table = routing_table
         self._records: dict[bytes, StoredRecord] = {}  # key -> StoredRecord
         self._max_record_size = max_record_size
         self._max_records = max_records
         self._record_filter = record_filter
+        self._k = k if k is not None else routing_table.k
 
     @property
     def records(self) -> dict[bytes, StoredRecord]:
@@ -161,8 +166,17 @@ class KadHandler:
             del self._records[k]
         return len(expired)
 
-    def _closest_peers_encoded(self, target: bytes, count: int = 20) -> list[bytes]:
-        """Return closest peers as encoded Peer protobufs."""
+    def _closest_peers_encoded(self, target: bytes, count: int | None = None) -> list[bytes]:
+        """Return closest peers as encoded Peer protobufs.
+
+        Args:
+            target: key or peer ID to find peers closest to.
+            count: maximum number of peers to return. Defaults to this
+                handler's configured k so inbound responses honor the node's
+                replication factor.
+        """
+        if count is None:
+            count = self._k
         entries = self.routing_table.closest_peers(target, count)
         result = []
         for entry in entries:

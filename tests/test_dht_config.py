@@ -55,3 +55,15 @@ def test_two_nodes_independent_k():
     assert b.k == 40
     assert a.routing_table.k == 8
     assert b.routing_table.k == 40
+
+
+def test_kad_handler_uses_node_k_for_inbound_responses():
+    """Inbound FIND_NODE / GET_VALUE responses honor the node's configured k.
+
+    Regression: prior to this fix, KadHandler._closest_peers_encoded
+    hardcoded count=20 regardless of DhtNode(k=...).
+    """
+    a = DhtNode(k=8)
+    b = DhtNode(k=40)
+    assert a.kad_handler._k == 8
+    assert b.kad_handler._k == 40

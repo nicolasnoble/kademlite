@@ -115,7 +115,9 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
             k=self._k,
             is_alive=lambda pid: self.peer_store.get_connection(pid) is not None,
         )
-        self.kad_handler = KadHandler(self.routing_table, record_filter=record_filter)
+        self.kad_handler = KadHandler(
+            self.routing_table, record_filter=record_filter, k=self._k
+        )
         self.listener: Listener | None = None
         self._listen_addr: tuple[str, int] | None = None
         self._republish_task: asyncio.Task | None = None
