@@ -49,9 +49,15 @@ class QueryMixin:
         queried: set[bytes] = set()
         queried.add(self.peer_id)  # don't query ourselves
         peer_map: dict[bytes, list[bytes]] = {}  # peer_id -> addrs
+        # Cache kad_id alongside peer_map so the per-round sort and the
+        # stall-detection comparison reuse sha256(peer_id) instead of
+        # recomputing per peer per round. Populated when peers are seeded
+        # AND when closer peers arrive in iterative responses.
+        peer_kad: dict[bytes, bytes] = {}
 
         for entry in closest:
             peer_map[entry.peer_id] = entry.addrs
+            peer_kad[entry.peer_id] = entry.kad_id
 
         parallelism = self._alpha
         stall_count = 0
@@ -59,7 +65,7 @@ class QueryMixin:
 
         for _round in range(MAX_LOOKUP_ROUNDS):
             # Sort by distance, pick unqueried peers up to current parallelism
-            candidates = sorted(peer_map.keys(), key=lambda p: xor_distance(kad_key(p), target_kad))
+            candidates = sorted(peer_map.keys(), key=lambda p: xor_distance(peer_kad[p], target_kad))
             # Skip peers already marked disconnected - they'd just timeout
             to_query = [
                 p for p in candidates
@@ -79,7 +85,7 @@ class QueryMixin:
             new_closer_found = False
             # Track the previous best distance for stall detection
             prev_best = min(
-                (xor_distance(kad_key(p), target_kad) for p in peer_map),
+                (xor_distance(peer_kad[p], target_kad) for p in peer_map),
                 default=None,
             )
 
@@ -89,9 +95,10 @@ class QueryMixin:
                 for pid, addrs in result:
                     if pid not in peer_map and pid != self.peer_id:
                         peer_map[pid] = addrs
+                        peer_kad[pid] = kad_key(pid)
                         self.routing_table.add_or_update(pid, addrs)
                         self.peer_store.add_addrs(pid, addrs)
-                        if prev_best is None or xor_distance(kad_key(pid), target_kad) < prev_best:
+                        if prev_best is None or xor_distance(peer_kad[pid], target_kad) < prev_best:
                             new_closer_found = True
 
             if not new_closer_found:
@@ -106,7 +113,7 @@ class QueryMixin:
                 parallelism = self._alpha
 
         # Return k closest
-        sorted_peers = sorted(peer_map.keys(), key=lambda p: xor_distance(kad_key(p), target_kad))
+        sorted_peers = sorted(peer_map.keys(), key=lambda p: xor_distance(peer_kad[p], target_kad))
         return [(p, peer_map[p]) for p in sorted_peers[:self._k]]
 
     async def _find_node_single(
@@ -148,13 +155,16 @@ class QueryMixin:
         queried: set[bytes] = set()
         queried.add(self.peer_id)
         peer_map: dict[bytes, list[bytes]] = {}
+        # Cache kad_id alongside peer_map (see _iterative_find_node).
+        peer_kad: dict[bytes, bytes] = {}
 
         for entry in closest:
             peer_map[entry.peer_id] = entry.addrs
+            peer_kad[entry.peer_id] = entry.kad_id
 
         key_kad = kad_key(key)
         for _round in range(MAX_LOOKUP_ROUNDS):
-            candidates = sorted(peer_map.keys(), key=lambda p: xor_distance(kad_key(p), key_kad))
+            candidates = sorted(peer_map.keys(), key=lambda p: xor_distance(peer_kad[p], key_kad))
             to_query = [
                 p for p in candidates
                 if p not in queried and self._is_peer_reachable(p)
@@ -181,6 +191,7 @@ class QueryMixin:
                 for pid, addrs in new_peers:
                     if pid not in peer_map and pid != self.peer_id:
                         peer_map[pid] = addrs
+                        peer_kad[pid] = kad_key(pid)
                         self.routing_table.add_or_update(pid, addrs)
                         self.peer_store.add_addrs(pid, addrs)
 
