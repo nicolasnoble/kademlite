@@ -434,9 +434,13 @@ async def test_mixed_cluster(interop_binary):
             await py_a.put(b"/test/from-py-a", b'{"origin": "python-a"}')
             await py_b.put(b"/test/from-py-b", b'{"origin": "python-b"}')
 
-            await asyncio.wait_for(
+            result_from_node = await asyncio.wait_for(
                 py_b.get(b"/test/from-node"), timeout=10.0
             )
+            assert result_from_node is not None, (
+                f"Python B couldn't GET /test/from-node put by {lang} reference"
+            )
+            assert json.loads(result_from_node) == {"origin": lang}
 
             result_a = await asyncio.wait_for(
                 py_a.get(b"/test/from-py-b"), timeout=10.0
