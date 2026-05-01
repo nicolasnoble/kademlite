@@ -31,6 +31,42 @@ def _node_multiaddr(node: DhtNode) -> str:
     return f"/ip4/{host}/tcp/{port}/p2p/{_base58btc_encode(node.peer_id)}"
 
 
+def _yamux_read_loop_tasks() -> list[asyncio.Task]:
+    """All currently-running tasks that are running YamuxSession._read_loop.
+
+    Identifies tasks by coroutine ``__qualname__`` rather than repr
+    substring, which is order-dependent across the test suite and can
+    false-match unrelated task representations.
+    """
+    result = []
+    for t in asyncio.all_tasks():
+        if t.done():
+            continue
+        coro = t.get_coro()
+        qual = getattr(coro, "__qualname__", "")
+        if qual.endswith("YamuxSession._read_loop"):
+            result.append(t)
+    return result
+
+
+async def _wait_for_yamux_count(target: int, timeout: float = 2.0) -> int:
+    """Poll up to ``timeout`` seconds for the active yamux read-loop count
+    to reach ``target``. Returns the final observed count.
+
+    Replaces fixed-sleep + single-snapshot leak checks: yamux teardown
+    runs background tasks that may not have completed at the moment of
+    a single snapshot, especially under loaded CI. Polling with a bound
+    is both more reliable and faster on the happy path.
+    """
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    while True:
+        n = len(_yamux_read_loop_tasks())
+        if n <= target or loop.time() >= deadline:
+            return n
+        await asyncio.sleep(0.05)
+
+
 async def test_dial_cleans_up_on_noise_negotiate_failure() -> None:
     """If multistream negotiation for /noise raises mid-dial, dial() must
     not leak the TCP socket. The exception propagates and the writer
@@ -56,16 +92,16 @@ async def test_dial_cleans_up_on_noise_negotiate_failure() -> None:
             with pytest.raises(RuntimeError, match="negotiate"):
                 await dial(client_id, host, port)
 
-        # If the cleanup worked, no orphan task should be pending.
-        # asyncio reports orphaned tasks at next scheduling tick; sleep
-        # briefly and check Task.all_tasks() doesn't accumulate.
-        await asyncio.sleep(0.1)
-        all_tasks = asyncio.all_tasks()
-        # Filter to tasks that look like yamux background loops (the
-        # specific resource we'd leak if cleanup didn't run).
-        yamux_loops = [t for t in all_tasks if "_read_loop" in repr(t)]
-        assert len(yamux_loops) == 0, (
-            f"yamux background task leaked after failed dial: {yamux_loops}"
+        # The negotiate-failure path runs before yamux is constructed,
+        # so there should never be a client-side yamux read loop. The
+        # listener accept() also raised mid-handshake (on the read end)
+        # so its yamux session may not have been constructed either.
+        # Either way, target=0 is correct: poll up to 2s for full
+        # cleanup convergence.
+        final = await _wait_for_yamux_count(target=0, timeout=2.0)
+        assert final == 0, (
+            f"yamux background task leaked after failed dial: "
+            f"observed {final} active read-loop tasks"
         )
     finally:
         await listener.stop()
@@ -234,9 +270,10 @@ async def test_dial_cleans_up_yamux_on_post_start_failure() -> None:
 
         # Patch start_inbound_handler to raise AFTER yamux has been
         # constructed and started in dial(). The cleanup helper must
-        # then call yamux.stop() in the except path.
+        # then call yamux.stop() in the except path. patch.object's
+        # context manager handles restoration on exit, so we don't
+        # need to capture the original.
         from kademlite.connection import Connection
-        original_start_handler = Connection.start_inbound_handler
 
         async def failing_handler(self):
             raise RuntimeError("post-yamux boom")
@@ -247,25 +284,16 @@ async def test_dial_cleans_up_yamux_on_post_start_failure() -> None:
             with pytest.raises(RuntimeError, match="post-yamux"):
                 await dial(client_id, host, port)
 
-        # Allow event loop to run any background cleanup.
-        await asyncio.sleep(0.1)
-
-        # No yamux read-loop task should survive the failed dial.
-        all_tasks = asyncio.all_tasks()
-        yamux_loops = [t for t in all_tasks if "_read_loop" in repr(t)]
-        # The listener side has its own yamux session that stays alive
-        # (it accepted the connection successfully); filter to client-side
-        # tasks only by checking the task isn't the listener's accepted one.
-        # Simpler: check task count is bounded - it should be exactly the
-        # listener's accepted-connection task, not two.
-        assert len(yamux_loops) <= 1, (
+        # Listener-side yamux read loop is alive (accept completed
+        # successfully on its end), so target=1 - the client side
+        # should be torn down by dial's cleanup helper. Poll for
+        # convergence rather than relying on a fixed sleep.
+        final = await _wait_for_yamux_count(target=1, timeout=2.0)
+        assert final <= 1, (
             f"dial cleanup should have stopped yamux on the client side; "
-            f"observed {len(yamux_loops)} _read_loop tasks: {yamux_loops}"
+            f"observed {final} active read-loop tasks (expected <= 1, "
+            f"the listener-accepted side)"
         )
-
-        # Restore for any later tests
-        with patch.object(Connection, "start_inbound_handler", new=original_start_handler):
-            pass
     finally:
         await listener.stop()
 

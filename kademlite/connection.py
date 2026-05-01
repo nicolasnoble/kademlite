@@ -265,7 +265,7 @@ async def accept(
 
 
 async def _cleanup_partial_handshake(
-    writer,
+    writer: asyncio.StreamWriter | None,
     noise: NoiseTransport | None,
     yamux: YamuxSession | None,
 ) -> None:
@@ -277,6 +277,12 @@ async def _cleanup_partial_handshake(
     succeeded. Each cleanup is wrapped in its own try/except so a
     failure in one step doesn't mask the original exception or skip
     later cleanup steps.
+
+    Writer ownership: dial() owns the TCP writer it allocated via
+    open_connection, so it passes the writer here for cleanup.
+    accept() does NOT own the writer (the listener does), so it
+    passes writer=None - the listener's _handle_connection cleans up
+    the TCP side itself.
 
     Order is reverse of allocation: yamux (which has a background
     task that needs cancellation) first, then noise (which holds
