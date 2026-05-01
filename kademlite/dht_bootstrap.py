@@ -147,6 +147,7 @@ class BootstrapMixin:
                     return False
                 connected += 1
             async with sem:
+                ok = False
                 try:
                     conn = await asyncio.wait_for(
                         dial(
@@ -183,13 +184,19 @@ class BootstrapMixin:
                     log.info(
                         f"{label} bootstrap: connected to {ip}:{port} (peer {peer_short}...)"
                     )
+                    ok = True
                     return True
                 except Exception as e:
                     log.debug(f"{label} bootstrap: failed to dial {ip}:{port}: {e}")
-                    # Release the reserved slot so other ips can take it.
-                    async with lock:
-                        connected -= 1
                     return False
+                finally:
+                    # Release the reserved slot on any non-success exit
+                    # (regular Exception, asyncio.CancelledError, anything).
+                    # asyncio.CancelledError is a BaseException, not Exception,
+                    # so the except clause above wouldn't catch it.
+                    if not ok:
+                        async with lock:
+                            connected -= 1
 
         await asyncio.gather(*(dial_one(ip) for ip in ips))
         log.info(f"{label} bootstrap: connected to {connected}/{len(ips)} peers")

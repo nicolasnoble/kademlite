@@ -237,12 +237,14 @@ async def test_open_stream_closes_yamux_stream_on_cancellation() -> None:
         conn = _conn_to(node_a, node_b)
         baseline = conn.yamux.live_streams_count
 
-        async def cancelled_negotiate(*args, **kwargs):
-            raise asyncio.CancelledError()
-
+        # Pass the exception CLASS as side_effect so AsyncMock instantiates
+        # and raises it at await-time. Passing an async-callable side_effect
+        # is unreliable here: AsyncMock can return the unawaited coroutine
+        # object instead of raising, which would silently fail to exercise
+        # the cancellation path under test.
         with patch(
             "kademlite.connection.negotiate_outbound",
-            side_effect=cancelled_negotiate,
+            side_effect=asyncio.CancelledError,
         ):
             with pytest.raises(asyncio.CancelledError):
                 await conn.open_stream("/some/proto")

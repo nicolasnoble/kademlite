@@ -189,11 +189,28 @@ async def _close_stream_quietly(stream) -> None:
     with cancellation.
     """
     close_task = asyncio.ensure_future(stream.close())
+
+    def _consume_close_exc(t: asyncio.Task) -> None:
+        # When the caller's task is cancelled while shield() is awaiting
+        # close_task, shield re-raises CancelledError immediately and we
+        # never await close_task ourselves. Without this callback, a
+        # subsequent stream.close() exception would surface as an
+        # asyncio "Task exception was never retrieved" warning. Consume
+        # and log it instead.
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            log.debug(f"stream close raised in background: {exc}")
+
+    close_task.add_done_callback(_consume_close_exc)
+
     try:
         await asyncio.shield(close_task)
     except asyncio.CancelledError:
         # Caller is cancelling us. close_task continues running outside
-        # our task scope; let the cancellation propagate.
+        # our task scope (the done-callback above will log any failure);
+        # let the cancellation propagate.
         raise
     except Exception as e:
         log.debug(f"stream close raised during cleanup: {e}")
