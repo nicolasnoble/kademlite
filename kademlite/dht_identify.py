@@ -139,6 +139,7 @@ class IdentifyMixin:
 
         Returns a list of binary multiaddrs, or [] on failure.
         """
+        stream = None
         try:
             stream, reader, writer = await asyncio.wait_for(
                 conn.open_stream(IDENTIFY_PROTOCOL), timeout=5.0
@@ -161,6 +162,12 @@ class IdentifyMixin:
         except Exception as e:
             log.warning(f"identify exchange failed with {conn.remote_peer_id.hex()[:16]}...: {e}")
             return []
+        finally:
+            if stream is not None:
+                try:
+                    await stream.close()
+                except Exception as e:
+                    log.debug(f"identify pull stream close raised: {e}")
 
     async def _maybe_set_observed_ip(self, observed_addr: bytes) -> None:
         """Extract our IP from an Identify observed_addr and update votes.
