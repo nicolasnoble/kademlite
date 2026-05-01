@@ -41,7 +41,9 @@ import time
 
 from kademlite.crypto import _base58btc_encode
 from kademlite.dht import DhtNode
+from kademlite.kademlia import kad_get_value
 from kademlite.multiaddr import PROTO_IP4, decode_multiaddr
+from kademlite.routing import kad_key, xor_distance
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,8 +78,60 @@ async def run_peer(host: str, port: int, dns: str | None, bootstrap: list[str]) 
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
-    await stop.wait()
-    await node.stop()
+
+    # Periodic state metrics for leak observability under sustained load
+    # (covers commits 5493aa4 / 6630070 / 44cea2e / 7350dea / fae4027 /
+    # be51fee at scale - watch for monotonic growth in live_streams).
+    metrics_interval = float(os.environ.get("METRICS_INTERVAL_SECS", "30"))
+    metrics_task = asyncio.create_task(_log_metrics_loop(node, metrics_interval, stop))
+
+    try:
+        await stop.wait()
+    finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        await node.stop()
+
+
+async def _log_metrics_loop(
+    node: DhtNode, interval: float, stop: asyncio.Event
+) -> None:
+    """Periodically log per-pod state for leak observability.
+
+    Emits a single line every ``interval`` seconds with:
+      - connections: live outbound/inbound peers in peer_store
+      - live_streams: sum of YamuxSession.live_streams_count across all
+        live connections. A monotonically-growing value across cycles
+        indicates a stream leak under load.
+      - routing_peers: total peers in the routing table
+      - records: count of locally-stored DHT records
+
+    Designed for Tier 2 K8s tests to verify the v0.2.0 stream-cleanup
+    commits hold under sustained traffic, not just single-shot RPCs.
+    """
+    while not stop.is_set():
+        try:
+            connected = node.peer_store.connected_peers()
+            live_streams = sum(
+                conn.yamux.live_streams_count for _peer_id, conn in connected
+            )
+            routing_peers = node.routing_table.size()
+            records = len(node.kad_handler.records)
+            log.info(
+                f"state: connections={len(connected)} "
+                f"live_streams={live_streams} "
+                f"routing_peers={routing_peers} "
+                f"records={records}"
+            )
+        except Exception as e:
+            log.debug(f"metrics loop error: {e}")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +552,130 @@ async def test_cluster_flood(node: DhtNode, results: TestResult) -> None:
                     f"{total_stores}/{expected_stores} stores ({coverage_ratio:.0%} of ideal)")
 
 
+async def test_kclosest_replication_correctness(
+    node: DhtNode, results: TestResult
+) -> None:
+    """Verify PUT_VALUE replicates to the K closest peers per the kad-dht
+    spec metric (XOR over sha256 keyspace), not just "some peers" or "every
+    peer it can reach."
+
+    This is the test the v0.1.0 audit identified as missing: existing
+    coverage proved direct RPC and rough store efficiency but never
+    asserted that records land on the right K peers. The keyspace bug
+    in v0.1.0 went undetected for exactly this reason - records still
+    appeared to "round-trip" but landed at wrong peers under the
+    Kademlia metric.
+
+    Procedure:
+      1. Snapshot the coordinator's routing table (all known peers).
+      2. For each test key, compute the expected K closest peers by
+         the spec metric: XOR(sha256(peer_id), sha256(key)).
+      3. PUT the value via the coordinator.
+      4. For each expected peer, dial it directly and call
+         kad_get_value(conn, key). A direct (single-peer, non-iterative)
+         GET_VALUE returns the record only if THAT specific peer has
+         it locally - so a non-None response is proof of correct
+         replication placement.
+      5. Assert the hit rate against expected closest peers is high
+         (allowing churn tolerance), and that the hit rate against a
+         random NON-closest peer is low.
+
+    This test only runs meaningfully at >= 30 peers; smaller clusters
+    have N < K and every peer is "closest" trivially.
+    """
+    log.info("TEST: kclosest_replication_correctness")
+    pod_name = os.environ.get("POD_NAME", "test")
+    k = node.k
+
+    all_peers = [p.peer_id for p in node.routing_table.all_peers()]
+    n = len(all_peers)
+    if n < max(30, k * 2):
+        log.warning(
+            f"  Skipping: need >= {max(30, k * 2)} peers for meaningful "
+            f"K-closest test, only have {n}"
+        )
+        results.record(
+            "kclosest replication (skipped, cluster too small)", True,
+            f"n={n}, need {max(30, k * 2)}"
+        )
+        return
+
+    n_keys = 5
+    keys = [f"/k8s/{pod_name}/kclosest/{i}".encode() for i in range(n_keys)]
+    value = json.dumps({"kclosest_test": True, "pod": pod_name}).encode()
+
+    # PUT all keys
+    put_results = await asyncio.gather(*(node.put(k_, value) for k_ in keys))
+    log.info(f"  PUT counts: {put_results}")
+    # Allow brief settle for replication to land
+    await asyncio.sleep(2.0)
+
+    expected_hits = 0
+    expected_total = 0
+    nonexpected_hits = 0
+    nonexpected_total = 0
+
+    for key in keys:
+        key_kad = kad_key(key)
+        # Sort all known peers by Kad-keyspace distance to the key.
+        sorted_peers = sorted(
+            all_peers, key=lambda p: xor_distance(kad_key(p), key_kad)
+        )
+        expected_closest = sorted_peers[:k]
+        # Sample a comparable number of NON-closest peers as a control.
+        nonexpected_sample = sorted_peers[k:k + k] if len(sorted_peers) > 2 * k else []
+
+        async def query_local(peer_id: bytes) -> bool:
+            """Direct (non-iterative) query; returns True only if peer holds the record locally."""
+            try:
+                conn = await asyncio.wait_for(
+                    node.peer_store.get_or_dial(peer_id), timeout=5.0
+                )
+                response = await asyncio.wait_for(
+                    kad_get_value(conn, key), timeout=5.0
+                )
+                if response is None:
+                    return False
+                record = response.get("record")
+                return record is not None and record.get("value") is not None
+            except Exception as e:
+                log.debug(f"  query to {peer_id.hex()[:12]}... failed: {e}")
+                return False
+
+        expected_outcomes = await asyncio.gather(
+            *(query_local(p) for p in expected_closest), return_exceptions=False
+        )
+        nonexpected_outcomes = await asyncio.gather(
+            *(query_local(p) for p in nonexpected_sample), return_exceptions=False
+        )
+        expected_hits += sum(1 for x in expected_outcomes if x)
+        expected_total += len(expected_outcomes)
+        nonexpected_hits += sum(1 for x in nonexpected_outcomes if x)
+        nonexpected_total += len(nonexpected_outcomes)
+
+    expected_rate = expected_hits / expected_total if expected_total else 0.0
+    nonexpected_rate = (
+        nonexpected_hits / nonexpected_total if nonexpected_total else 0.0
+    )
+
+    # Tolerate churn / delivery variance, but expected-hit rate must be
+    # substantially higher than non-expected (the property under test).
+    results.record(
+        "kclosest replication: K closest peers hold record",
+        expected_rate >= 0.7,
+        f"{expected_hits}/{expected_total} ({expected_rate:.0%})"
+    )
+    # The control: non-closest peers should rarely hold the record. If
+    # this rate is comparable to or higher than expected_rate, the
+    # routing metric is wrong even if records eventually round-trip.
+    results.record(
+        "kclosest replication: non-closest peers rarely hold record",
+        nonexpected_rate < max(0.3, expected_rate - 0.4),
+        f"{nonexpected_hits}/{nonexpected_total} ({nonexpected_rate:.0%}), "
+        f"expected_rate={expected_rate:.0%}"
+    )
+
+
 async def test_large_record(node: DhtNode, results: TestResult) -> None:
     """PUT a record near the max size and verify cross-node transfer."""
     log.info("TEST: large_record")
@@ -557,6 +735,7 @@ async def run_test(host: str, port: int, dns: str | None, bootstrap: list[str]) 
         await test_multi_hop_lookup(node, results)
         await test_large_record(node, results)
         await test_cluster_flood(node, results)
+        await test_kclosest_replication_correctness(node, results)
 
         # Record filter test needs a second node with a filter
         log.info("TEST: record_filter (spawning filtered node)")
