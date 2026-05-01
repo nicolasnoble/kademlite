@@ -120,6 +120,14 @@ class Listener:
             # cancellation. ALWAYS decrement _active_connections - if
             # cancellation lands inside the cleanup awaits, we'd
             # otherwise leak the listener slot forever.
+            #
+            # Cancellation safety: catch CancelledError per cleanup
+            # step, capture the instance, finish the rest of the
+            # cleanup, and re-raise the original cancellation at the
+            # end so caller-task cancellation propagates with its
+            # original message/context preserved (matches the
+            # _cleanup_partial_handshake pattern in connection.py).
+            cleanup_cancelled: asyncio.CancelledError | None = None
             try:
                 if not accept_succeeded:
                     if conn is not None:
@@ -131,6 +139,9 @@ class Listener:
                         # would conflict with Connection's resources.
                         try:
                             await conn.close()
+                        except asyncio.CancelledError as exc:
+                            cleanup_cancelled = cleanup_cancelled or exc
+                            log.debug("conn.close cancelled during accept cleanup; continuing")
                         except Exception as e:
                             log.debug(f"conn.close during accept cleanup raised: {e}")
                     else:
@@ -140,7 +151,12 @@ class Listener:
                         try:
                             writer.close()
                             await writer.wait_closed()
+                        except asyncio.CancelledError as exc:
+                            cleanup_cancelled = cleanup_cancelled or exc
+                            log.debug("writer.wait_closed cancelled during cleanup")
                         except Exception as e:
                             log.debug(f"writer.close/wait_closed during cleanup raised: {e}")
             finally:
                 self._active_connections -= 1
+            if cleanup_cancelled is not None:
+                raise cleanup_cancelled
