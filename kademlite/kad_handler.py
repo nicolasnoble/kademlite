@@ -25,7 +25,7 @@ from .kademlia import (
     encode_peer,
     encode_record,
 )
-from .routing import RoutingTable, xor_distance
+from .routing import RoutingTable, kad_key, xor_distance
 
 log = logging.getLogger(__name__)
 
@@ -128,16 +128,17 @@ class KadHandler:
     def _evict_furthest(self, incoming_key: bytes) -> None:
         """Evict the record whose key is furthest from our peer ID.
 
+        Distance is measured in the Kad keyspace (sha256 of both inputs).
         If the incoming key is further than all existing keys, it is not
         stored (the caller should handle this, but in practice we always
         evict because the incoming record is presumably closer to us or
         equally important).
         """
-        local_id = self.routing_table.local_peer_id
+        local_kad_id = kad_key(self.routing_table.local_peer_id)
         furthest_key = None
         furthest_dist = -1
         for k in self._records:
-            d = xor_distance(k, local_id)
+            d = xor_distance(kad_key(k), local_kad_id)
             if d > furthest_dist:
                 furthest_dist = d
                 furthest_key = k

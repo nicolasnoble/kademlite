@@ -18,7 +18,7 @@ import logging
 
 from kademlite.crypto import _base58btc_encode
 from kademlite.dht import DhtNode
-from kademlite.routing import xor_distance
+from kademlite.routing import kad_key, xor_distance
 
 logging.basicConfig(
     level=logging.INFO,
@@ -238,9 +238,12 @@ async def test_put_stores_on_closest_peers():
             f"but only on nodes {nodes_with_record}"
         )
 
+        # Distance is measured in the Kad keyspace (sha256-then-XOR), matching
+        # the libp2p kad-dht spec and the routing table's metric.
+        key_kad = kad_key(key)
         distances = []
         for i, n in enumerate(nodes):
-            d = xor_distance(n.peer_id, key)
+            d = xor_distance(kad_key(n.peer_id), key_kad)
             distances.append((d, i))
         distances.sort()
 

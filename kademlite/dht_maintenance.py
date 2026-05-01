@@ -110,33 +110,31 @@ class MaintenanceMixin:
             except Exception as e:
                 log.debug(f"bucket {i} refresh failed: {e}")
 
-    def _random_key_for_bucket(self, cpl: int) -> bytes:
-        """Generate a random peer ID that falls into the given bucket (CPL).
+    def _random_key_for_bucket(self, cpl: int, max_attempts: int = 65536) -> bytes:
+        """Generate a random preimage whose Kad-keyspace CPL with our local
+        peer ID matches the given bucket index.
 
-        The key shares `cpl` leading bits with our peer ID, then differs at
-        bit `cpl`, and is random after that.
+        Because the Kad keyspace is reached through SHA-256, we cannot
+        construct a preimage with a target keyspace CPL directly: we use
+        rejection sampling. The expected attempts to hit bucket ``cpl`` is
+        ``2^(cpl+1)``; for typical populated buckets (cpl <= ~12) this is
+        cheap. For very deep buckets it may exhaust ``max_attempts``, in
+        which case we fall back to a uniformly random key (still useful
+        for discovery, just not bucket-targeted).
         """
-        local = self.peer_id
-        key = bytearray(os.urandom(len(local)))
+        from .routing import _common_prefix_length, kad_key
 
-        # Copy the first `cpl` full bytes
-        full_bytes = cpl // 8
-        for i in range(full_bytes):
-            key[i] = local[i]
-
-        # Handle the partial byte: copy top bits, flip the divergence bit
-        remaining_bits = cpl % 8
-        if full_bytes < len(local):
-            byte_val = local[full_bytes]
-            # The bit at position `remaining_bits` must differ from local
-            flip_bit = 0x80 >> remaining_bits
-            # XOR the original byte to flip exactly the divergence bit
-            flipped = byte_val ^ flip_bit
-            # Keep top (remaining_bits + 1) bits from flipped, rest random
-            control_mask = ((0xFF << (8 - remaining_bits)) | flip_bit) & 0xFF
-            key[full_bytes] = (flipped & control_mask) | (key[full_bytes] & ~control_mask)
-
-        return bytes(key)
+        local_kad = kad_key(self.peer_id)
+        for _ in range(max_attempts):
+            candidate = os.urandom(32)
+            if _common_prefix_length(local_kad, kad_key(candidate)) == cpl:
+                return candidate
+        # Couldn't hit the target bucket - fall back to a random key.
+        log.debug(
+            f"bucket refresh: rejection sampling exhausted at cpl={cpl} "
+            f"after {max_attempts} attempts, using random key"
+        )
+        return os.urandom(32)
 
     async def _republish_loop(self) -> None:
         """Background loop: re-PUT originated records, replicate stored, and expire old ones.

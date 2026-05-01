@@ -11,7 +11,7 @@ import asyncio
 import logging
 
 from .kademlia import kad_find_node, kad_get_value, kad_put_value
-from .routing import xor_distance
+from .routing import kad_key, xor_distance
 
 log = logging.getLogger(__name__)
 
@@ -55,10 +55,11 @@ class QueryMixin:
 
         parallelism = self._alpha
         stall_count = 0
+        target_kad = kad_key(target)
 
         for _round in range(MAX_LOOKUP_ROUNDS):
             # Sort by distance, pick unqueried peers up to current parallelism
-            candidates = sorted(peer_map.keys(), key=lambda p: xor_distance(p, target))
+            candidates = sorted(peer_map.keys(), key=lambda p: xor_distance(kad_key(p), target_kad))
             # Skip peers already marked disconnected - they'd just timeout
             to_query = [
                 p for p in candidates
@@ -78,7 +79,7 @@ class QueryMixin:
             new_closer_found = False
             # Track the previous best distance for stall detection
             prev_best = min(
-                (xor_distance(p, target) for p in peer_map),
+                (xor_distance(kad_key(p), target_kad) for p in peer_map),
                 default=None,
             )
 
@@ -90,7 +91,7 @@ class QueryMixin:
                         peer_map[pid] = addrs
                         self.routing_table.add_or_update(pid, addrs)
                         self.peer_store.add_addrs(pid, addrs)
-                        if prev_best is None or xor_distance(pid, target) < prev_best:
+                        if prev_best is None or xor_distance(kad_key(pid), target_kad) < prev_best:
                             new_closer_found = True
 
             if not new_closer_found:
@@ -105,7 +106,7 @@ class QueryMixin:
                 parallelism = self._alpha
 
         # Return k closest
-        sorted_peers = sorted(peer_map.keys(), key=lambda p: xor_distance(p, target))
+        sorted_peers = sorted(peer_map.keys(), key=lambda p: xor_distance(kad_key(p), target_kad))
         return [(p, peer_map[p]) for p in sorted_peers[:self._k]]
 
     async def _find_node_single(
@@ -151,8 +152,9 @@ class QueryMixin:
         for entry in closest:
             peer_map[entry.peer_id] = entry.addrs
 
+        key_kad = kad_key(key)
         for _round in range(MAX_LOOKUP_ROUNDS):
-            candidates = sorted(peer_map.keys(), key=lambda p: xor_distance(p, key))
+            candidates = sorted(peer_map.keys(), key=lambda p: xor_distance(kad_key(p), key_kad))
             to_query = [
                 p for p in candidates
                 if p not in queried and self._is_peer_reachable(p)

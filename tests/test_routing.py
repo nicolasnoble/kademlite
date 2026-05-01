@@ -26,8 +26,30 @@ from kademlite.routing import (
     RoutingTable,
     _common_prefix_length,
     _leading_zeros,
+    kad_key,
     xor_distance,
 )
+
+# --- Kad keyspace transform ---
+
+
+def test_kad_key_is_sha256():
+    """kad_key matches the libp2p kad-dht spec: SHA-256 of the input."""
+    import hashlib
+    for sample in [b"", b"\x00" * 32, b"hello", b"/test/key/1", b"\x80" * 32]:
+        assert kad_key(sample) == hashlib.sha256(sample).digest()
+
+
+def test_kad_key_diverges_from_raw_xor():
+    """Sanity: raw XOR and Kad-keyspace XOR pick different closest peers
+    for at least one input. Codifies the audit finding that kademlite
+    pre-fix was using raw XOR vs the spec's keyspace-XOR."""
+    target = b"/test/key/1"
+    peers = [bytes([i]) * 32 for i in range(16)]
+    raw_order = sorted(peers, key=lambda p: xor_distance(p, target))
+    kad_order = sorted(peers, key=lambda p: xor_distance(kad_key(p), kad_key(target)))
+    assert raw_order != kad_order
+
 
 # --- XOR distance ---
 
@@ -181,25 +203,33 @@ def test_routing_table_no_self():
 
 
 def test_routing_table_closest_peers():
+    """closest_peers orders by Kad-keyspace XOR distance (sha256-then-XOR).
+
+    Because the keyspace transform randomizes order vs raw bytes, we
+    assert the routing table matches the spec metric rather than a
+    handpicked permutation.
+    """
     local_id = b"\x00" * 32
     rt = RoutingTable(local_id)
 
-    # Add some peers at known distances
-    peer1 = b"\x00" * 31 + b"\x01"  # distance 1
-    peer2 = b"\x00" * 31 + b"\x02"  # distance 2
-    peer3 = b"\x80" + b"\x00" * 31  # distance 2^255
+    peer1 = b"\x00" * 31 + b"\x01"
+    peer2 = b"\x00" * 31 + b"\x02"
+    peer3 = b"\x80" + b"\x00" * 31
 
     rt.add_or_update(peer1, [])
     rt.add_or_update(peer2, [])
     rt.add_or_update(peer3, [])
 
-    # Closest to local_id should be peer1, then peer2, then peer3
     target = b"\x00" * 32
+    target_kad = kad_key(target)
+    expected = sorted(
+        [peer1, peer2, peer3],
+        key=lambda p: xor_distance(kad_key(p), target_kad),
+    )
+
     closest = rt.closest_peers(target, 3)
     assert len(closest) == 3
-    assert closest[0].peer_id == peer1
-    assert closest[1].peer_id == peer2
-    assert closest[2].peer_id == peer3
+    assert [c.peer_id for c in closest] == expected
 
 
 def test_routing_table_closest_peers_limited():
@@ -250,17 +280,24 @@ def test_kad_handler_record_expiry():
 
 
 def test_random_key_for_bucket_cpl():
-    """_random_key_for_bucket(cpl) must produce a key whose CPL with
-    our peer ID is exactly `cpl`."""
+    """_random_key_for_bucket(cpl) must produce a key whose Kad-keyspace
+    CPL with our peer ID is exactly `cpl`.
+
+    The CPL is measured after sha256 transform on both inputs, matching
+    the kad-dht spec metric used by the routing table.
+    """
     identity = Ed25519Identity.generate()
     node = DhtNode(identity=identity)
     node._listen_addr = ("127.0.0.1", 0)
 
-    for cpl in [0, 1, 7, 8, 15, 16, 31, 63, 127]:
+    # Restrict to shallower buckets to keep rejection sampling deterministic.
+    # Probability of hitting bucket cpl is 2^-(cpl+1); the default 65536-attempt
+    # budget is virtually guaranteed to succeed up to cpl=10 (e^-32 miss rate).
+    for cpl in [0, 1, 7, 8, 10]:
         key = node._random_key_for_bucket(cpl)
-        actual_cpl = _common_prefix_length(node.peer_id, key)
+        actual_cpl = _common_prefix_length(kad_key(node.peer_id), kad_key(key))
         assert actual_cpl == cpl, (
-            f"_random_key_for_bucket({cpl}) produced key with CPL={actual_cpl}"
+            f"_random_key_for_bucket({cpl}) produced key with kad-CPL={actual_cpl}"
         )
 
 
