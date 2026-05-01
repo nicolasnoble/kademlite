@@ -156,8 +156,15 @@ class Connection:
     async def close(self) -> None:
         # Cancel the dispatcher first so it stops spawning new
         # _negotiate_inbound_stream tasks while we're tearing down.
+        # Wait for the dispatcher to actually quiesce before snapshotting
+        # _stream_tasks - otherwise a task spawned after our snapshot
+        # could escape the cancel-and-gather sweep below.
         if self._inbound_task:
             self._inbound_task.cancel()
+            try:
+                await self._inbound_task
+            except (asyncio.CancelledError, Exception):
+                pass
         # Cancel any in-flight per-stream negotiation/handler tasks so
         # they don't outlive the yamux session. Each will hit
         # CancelledError on its current await; their finally clauses

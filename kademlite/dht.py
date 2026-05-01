@@ -136,6 +136,13 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
         self._bootstrap_peers: list[str] = []
         self._bootstrap_hostlist: str | None = None
         self._mdns: MdnsDiscovery | None = None
+        # mDNS-only nodes start with an empty routing table so the
+        # bootstrap-time wait_until_routable refresh skips. Track
+        # whether the one-shot per-CPL refresh has been triggered yet,
+        # so the FIRST mDNS-discovered peer fires it once. Subsequent
+        # mDNS discoveries hit the maintenance loop's normal refresh
+        # cadence rather than running fresh per-CPL walks every time.
+        self._mdns_routable_refresh_done: bool = False
 
     @property
     def peer_id(self) -> bytes:
@@ -469,6 +476,23 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
         log.info(f"mDNS: connecting to discovered peer {peer_id.hex()[:16]}...")
         await self.bootstrap([multiaddr_str])
 
+        # mDNS-only nodes skip the bootstrap-time per-CPL refresh
+        # (because start() ran with an empty routing table). Now that
+        # we have at least one peer, fire the routability refresh once
+        # in the background so distant-bucket discovery doesn't have to
+        # wait for the 5-min maintenance loop. Spawned as a tracked
+        # background task rather than awaited inline so this callback
+        # stays fast.
+        if (
+            not self._mdns_routable_refresh_done
+            and self.routing_table.size() > 0
+        ):
+            self._mdns_routable_refresh_done = True
+            log.info(
+                "mDNS: first peer discovered, firing one-shot routability refresh"
+            )
+            self._track_task(asyncio.create_task(self._refresh_buckets()))
+
     # -- Connection callbacks --------------------------------------------------
 
     async def _on_inbound_connection(self, conn: Connection) -> None:
@@ -536,10 +560,13 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
         try:
             while True:
                 stream, reader, writer = await queue.get()
+                # Track the per-stream handler task so DhtNode.stop()
+                # cancels it via _dispatch_tasks rather than leaving it
+                # to outlive the connection.
                 t = asyncio.create_task(
                     self.kad_handler.handle_stream(stream, reader, writer, sender=remote_peer_id)
                 )
-                t.add_done_callback(_log_task_exception)
+                self._track_task(t)
         except asyncio.CancelledError:
             pass
         except Exception as e:

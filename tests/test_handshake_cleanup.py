@@ -205,6 +205,63 @@ async def test_dial_closes_writer_on_pre_noise_failure() -> None:
         await listener.stop()
 
 
+async def test_dial_cleans_up_yamux_on_post_start_failure() -> None:
+    """When dial() fails AFTER ``yamux.start()`` succeeds (e.g. an
+    Exception during register_protocol or start_inbound_handler), the
+    cleanup helper must call ``yamux.stop()`` so the background read-loop
+    task doesn't outlive the failed dial.
+
+    This exercises the actual expensive partial-handshake case the
+    cleanup helper exists for - the negotiate_outbound failure mode
+    above triggers cleanup BEFORE yamux is constructed, so it can't
+    catch a yamux-stop regression.
+    """
+    identity = Ed25519Identity.generate()
+    listener = Listener(identity, host="127.0.0.1", port=0)
+    await listener.start()
+    host, port = listener.listen_addr
+
+    try:
+        client_id = Ed25519Identity.generate()
+
+        # Patch start_inbound_handler to raise AFTER yamux has been
+        # constructed and started in dial(). The cleanup helper must
+        # then call yamux.stop() in the except path.
+        from kademlite.connection import Connection
+        original_start_handler = Connection.start_inbound_handler
+
+        async def failing_handler(self):
+            raise RuntimeError("post-yamux boom")
+
+        with patch.object(
+            Connection, "start_inbound_handler", new=failing_handler
+        ):
+            with pytest.raises(RuntimeError, match="post-yamux"):
+                await dial(client_id, host, port)
+
+        # Allow event loop to run any background cleanup.
+        await asyncio.sleep(0.1)
+
+        # No yamux read-loop task should survive the failed dial.
+        all_tasks = asyncio.all_tasks()
+        yamux_loops = [t for t in all_tasks if "_read_loop" in repr(t)]
+        # The listener side has its own yamux session that stays alive
+        # (it accepted the connection successfully); filter to client-side
+        # tasks only by checking the task isn't the listener's accepted one.
+        # Simpler: check task count is bounded - it should be exactly the
+        # listener's accepted-connection task, not two.
+        assert len(yamux_loops) <= 1, (
+            f"dial cleanup should have stopped yamux on the client side; "
+            f"observed {len(yamux_loops)} _read_loop tasks: {yamux_loops}"
+        )
+
+        # Restore for any later tests
+        with patch.object(Connection, "start_inbound_handler", new=original_start_handler):
+            pass
+    finally:
+        await listener.stop()
+
+
 async def test_connection_close_with_no_stream_tasks_is_clean() -> None:
     """Connection.close() with no in-flight per-stream tasks must
     proceed normally (no NoneType errors, no hangs on empty gather)."""
