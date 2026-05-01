@@ -171,19 +171,31 @@ def _write_length_prefixed(writer, data: bytes) -> None:
     writer.write(_encode_uvarint(len(data)) + data)
 
 
+async def _close_stream_quietly(stream) -> None:
+    """Best-effort stream close that never raises.
+
+    Used in `finally` blocks of outbound Kad RPCs so a CancelledError or
+    timeout during read/write/decode still releases the underlying yamux
+    stream rather than waiting for connection teardown.
+    """
+    try:
+        await stream.close()
+    except Exception as e:
+        log.debug(f"stream close raised during cleanup: {e}")
+
+
 async def kad_get_value(conn, key: bytes) -> dict | None:
     """Send a GET_VALUE request over a new Kademlia stream."""
     stream, reader, writer = await conn.open_stream(KADEMLIA_PROTOCOL)
+    try:
+        request = encode_kad_message(MSG_GET_VALUE, key=key)
+        _write_length_prefixed(writer, request)
+        await writer.drain()
 
-    request = encode_kad_message(MSG_GET_VALUE, key=key)
-    _write_length_prefixed(writer, request)
-    await writer.drain()
-
-    response_data = await _read_length_prefixed(reader)
-    response = decode_kad_message(response_data)
-
-    await stream.close()
-    return response
+        response_data = await _read_length_prefixed(reader)
+        return decode_kad_message(response_data)
+    finally:
+        await _close_stream_quietly(stream)
 
 
 async def kad_put_value(
@@ -192,29 +204,27 @@ async def kad_put_value(
 ) -> dict | None:
     """Send a PUT_VALUE request over a new Kademlia stream."""
     stream, reader, writer = await conn.open_stream(KADEMLIA_PROTOCOL)
+    try:
+        record = encode_record(key, value, publisher=publisher, ttl=ttl)
+        request = encode_kad_message(MSG_PUT_VALUE, key=key, record=record)
+        _write_length_prefixed(writer, request)
+        await writer.drain()
 
-    record = encode_record(key, value, publisher=publisher, ttl=ttl)
-    request = encode_kad_message(MSG_PUT_VALUE, key=key, record=record)
-    _write_length_prefixed(writer, request)
-    await writer.drain()
-
-    response_data = await _read_length_prefixed(reader)
-    response = decode_kad_message(response_data)
-
-    await stream.close()
-    return response
+        response_data = await _read_length_prefixed(reader)
+        return decode_kad_message(response_data)
+    finally:
+        await _close_stream_quietly(stream)
 
 
 async def kad_find_node(conn, key: bytes) -> dict | None:
     """Send a FIND_NODE request over a new Kademlia stream."""
     stream, reader, writer = await conn.open_stream(KADEMLIA_PROTOCOL)
+    try:
+        request = encode_kad_message(MSG_FIND_NODE, key=key)
+        _write_length_prefixed(writer, request)
+        await writer.drain()
 
-    request = encode_kad_message(MSG_FIND_NODE, key=key)
-    _write_length_prefixed(writer, request)
-    await writer.drain()
-
-    response_data = await _read_length_prefixed(reader)
-    response = decode_kad_message(response_data)
-
-    await stream.close()
-    return response
+        response_data = await _read_length_prefixed(reader)
+        return decode_kad_message(response_data)
+    finally:
+        await _close_stream_quietly(stream)
