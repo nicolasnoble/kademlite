@@ -38,6 +38,10 @@ class Listener:
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         handshake_timeout: float = DEFAULT_HANDSHAKE_TIMEOUT,
     ):
+        if handshake_timeout <= 0:
+            raise ValueError(
+                f"handshake_timeout must be positive, got {handshake_timeout}"
+            )
         self.identity = identity
         self.host = host
         self.port = port

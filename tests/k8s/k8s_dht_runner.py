@@ -594,9 +594,9 @@ async def test_kclosest_replication_correctness(
             f"  Skipping: need >= {max(30, k * 2)} peers for meaningful "
             f"K-closest test, only have {n}"
         )
-        results.record(
-            "kclosest replication (skipped, cluster too small)", True,
-            f"n={n}, need {max(30, k * 2)}"
+        results.skip(
+            "kclosest replication",
+            f"cluster too small: n={n}, need {max(30, k * 2)}",
         )
         return
 
@@ -623,7 +623,8 @@ async def test_kclosest_replication_correctness(
         )
         expected_closest = sorted_peers[:k]
         # Sample a comparable number of NON-closest peers as a control.
-        nonexpected_sample = sorted_peers[k:k + k] if len(sorted_peers) > 2 * k else []
+        # Slicing handles bounds; entry guard above already requires n >= 2k.
+        nonexpected_sample = sorted_peers[k:k + k]
 
         async def query_local(peer_id: bytes, key_=key) -> bool:
             """Direct (non-iterative) query; returns True only if peer holds the record locally.

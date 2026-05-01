@@ -47,6 +47,32 @@ def test_alpha_negative_rejected():
         DhtNode(alpha=-1)
 
 
+def test_k_bool_rejected():
+    """bool is a subclass of int in Python; ``DhtNode(k=True)`` would
+    silently behave like ``k=1``. Reject explicitly with TypeError."""
+    with pytest.raises(TypeError):
+        DhtNode(k=True)
+    with pytest.raises(TypeError):
+        DhtNode(k=False)
+
+
+def test_k_float_rejected():
+    """Floats slip through ``k <= 0`` checks and would only fail later
+    when used as a count. Reject at construction."""
+    with pytest.raises(TypeError):
+        DhtNode(k=1.5)
+
+
+def test_alpha_bool_rejected():
+    with pytest.raises(TypeError):
+        DhtNode(alpha=True)
+
+
+def test_alpha_float_rejected():
+    with pytest.raises(TypeError):
+        DhtNode(alpha=2.0)
+
+
 def test_two_nodes_independent_k():
     """Two DhtNode instances in the same process can hold different k values."""
     a = DhtNode(k=8)

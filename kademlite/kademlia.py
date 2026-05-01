@@ -9,6 +9,7 @@ Wire protocol uses protobuf messages sent as length-prefixed frames
 over a Yamux stream: <uvarint-length><protobuf-message>
 """
 
+import asyncio
 import logging
 
 from .crypto import _encode_uvarint
@@ -172,14 +173,28 @@ def _write_length_prefixed(writer, data: bytes) -> None:
 
 
 async def _close_stream_quietly(stream) -> None:
-    """Best-effort stream close that never raises.
+    """Best-effort stream close that survives caller-task cancellation.
 
-    Used in `finally` blocks of outbound Kad RPCs so a CancelledError or
-    timeout during read/write/decode still releases the underlying yamux
-    stream rather than waiting for connection teardown.
+    Cancellation safety: spawns the close as a background task and shields
+    it from the caller's cancellation. If the caller's task is cancelled
+    mid-close, the close completes in the background and CancelledError
+    re-raises to honor the cancellation contract. On Python 3.11+ a bare
+    ``await stream.close()`` inside a finally block can be interrupted by
+    a pending cancellation before FIN/RST is sent, leaving the yamux
+    stream live; the shield + ensure_future pattern prevents that leak.
+
+    Errors raised by ``stream.close()`` itself are logged at debug level.
+    Used in cleanup paths of outbound Kad RPCs, identify handlers, and
+    inbound stream negotiation - anywhere the close itself might race
+    with cancellation.
     """
+    close_task = asyncio.ensure_future(stream.close())
     try:
-        await stream.close()
+        await asyncio.shield(close_task)
+    except asyncio.CancelledError:
+        # Caller is cancelling us. close_task continues running outside
+        # our task scope; let the cancellation propagate.
+        raise
     except Exception as e:
         log.debug(f"stream close raised during cleanup: {e}")
 

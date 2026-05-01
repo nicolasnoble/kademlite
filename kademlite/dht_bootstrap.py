@@ -138,11 +138,15 @@ class BootstrapMixin:
 
         async def dial_one(ip: str) -> bool:
             nonlocal connected
-            if connected >= self._k:
-                return False
-            async with sem:
+            # Atomically reserve a slot under the lock: check-and-reserve
+            # in one critical section so concurrent dial_one tasks can't
+            # all pass an early check and overshoot k. The reservation is
+            # released on failure inside the dial path.
+            async with lock:
                 if connected >= self._k:
                     return False
+                connected += 1
+            async with sem:
                 try:
                     conn = await asyncio.wait_for(
                         dial(
@@ -175,8 +179,6 @@ class BootstrapMixin:
                         self.routing_table.add_or_update(peer_id, routable)
                         self.peer_store.replace_addrs(peer_id, routable)
 
-                    async with lock:
-                        connected += 1
                     peer_short = peer_id.hex()[:16]
                     log.info(
                         f"{label} bootstrap: connected to {ip}:{port} (peer {peer_short}...)"
@@ -184,6 +186,9 @@ class BootstrapMixin:
                     return True
                 except Exception as e:
                     log.debug(f"{label} bootstrap: failed to dial {ip}:{port}: {e}")
+                    # Release the reserved slot so other ips can take it.
+                    async with lock:
+                        connected -= 1
                     return False
 
         await asyncio.gather(*(dial_one(ip) for ip in ips))

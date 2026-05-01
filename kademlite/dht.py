@@ -84,6 +84,15 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
                 of concurrent FIND_NODE / GET_VALUE requests per round. Matches
                 the libp2p kad-dht spec's `alpha`.
         """
+        # Reject bool explicitly: bool is a subclass of int in Python so
+        # ``isinstance(True, int)`` is True and ``True > 0`` is True, which
+        # would silently treat ``DhtNode(k=True)`` as ``k=1``. Also reject
+        # floats so a misconfigured ``k=20.0`` fails fast at construction
+        # rather than at routing-table comparison time.
+        if isinstance(k, bool) or not isinstance(k, int):
+            raise TypeError(f"k must be an int, got {type(k).__name__}")
+        if isinstance(alpha, bool) or not isinstance(alpha, int):
+            raise TypeError(f"alpha must be an int, got {type(alpha).__name__}")
         if k <= 0:
             raise ValueError(f"k must be positive, got {k}")
         if alpha <= 0:

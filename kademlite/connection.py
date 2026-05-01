@@ -109,12 +109,11 @@ class Connection:
             log.warning(f"inbound stream negotiation failed: {e}")
         finally:
             if not dispatched:
-                try:
-                    await stream.close()
-                except Exception as close_err:
-                    log.debug(
-                        f"inbound stream close after dispatch failure raised: {close_err}"
-                    )
+                # Use the cancel-safe close helper so a cancellation in
+                # the caller's task can't interrupt the close mid-await
+                # and leave the stream live.
+                from .kademlia import _close_stream_quietly
+                await _close_stream_quietly(stream)
 
     async def open_stream(
         self, protocol_id: str
@@ -132,12 +131,11 @@ class Connection:
             reader, writer = _stream_to_rw(stream)
             await negotiate_outbound(reader, writer, protocol_id)
         except BaseException:
-            try:
-                await stream.close()
-            except Exception as close_err:
-                log.debug(
-                    f"stream close after negotiation failure raised: {close_err}"
-                )
+            # Use the cancel-safe close helper: caller's cancellation
+            # could otherwise interrupt the close mid-await and leak
+            # the half-opened yamux stream.
+            from .kademlia import _close_stream_quietly
+            await _close_stream_quietly(stream)
             raise
         return stream, reader, writer
 

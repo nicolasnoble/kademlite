@@ -422,19 +422,24 @@ async def test_mixed_cluster(interop_binary):
         await py_a.start("127.0.0.1", 0)
         addr_a = node_multiaddr(py_a)
 
-        # The interop node dials py_a first, so py_a ends up in its routing
-        # table and the iterative PUT replicates /test/from-node to py_a.
-        # Without the explicit peer= the interop node's overlay is isolated
-        # and the record never reaches py_a, so py_b's GET via py_a fails.
+        # The interop node dials py_a first so the python side learns about
+        # it via Identify. py_b then bootstraps to BOTH py_a AND the interop
+        # node directly: that way py_b's routing table includes the interop
+        # node as a primary peer rather than relying on closer-peer hints
+        # from py_a (which may or may not surface the interop node depending
+        # on iterative-lookup ordering and replication placement).
         with InteropNode(
             binary_path, "put", "/test/from-node",
             json.dumps({"origin": lang}),
             peer=addr_a,
             timeout_secs=30,
-        ):
+        ) as remote:
             await asyncio.sleep(1.0)
 
-            await py_b.start("127.0.0.1", 0, bootstrap_peers=[addr_a])
+            await py_b.start(
+                "127.0.0.1", 0,
+                bootstrap_peers=[addr_a, remote.full_addr],
+            )
             await asyncio.sleep(0.5)
 
             await py_a.put(b"/test/from-py-a", b'{"origin": "python-a"}')
