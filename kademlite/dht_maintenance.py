@@ -51,48 +51,63 @@ class MaintenanceMixin:
 
         Always runs a self-lookup (and re-dials bootstrap peers when sparse).
         This matches rust-libp2p behavior: periodic bootstrap is unconditional,
-        not gated on routing table size.
+        not gated on routing table size. The actual work of one cycle is in
+        ``_periodic_bootstrap_tick`` so tests can drive it deterministically
+        without monkey-patching ``asyncio.sleep``.
         """
         try:
             while True:
                 await asyncio.sleep(BOOTSTRAP_INTERVAL)
-
-                # Prune disconnected peers before sampling table size so the
-                # sparse-table check reflects actual reachable peers. Reading
-                # size first would race against the prune and skip the
-                # recovery cycle when pruning drops us below k.
-                self._quick_prune()
-                size = self.routing_table.size()
-
-                if size < self._k:
-                    # Sparse table: re-dial bootstrap peers first
-                    log.info(
-                        f"periodic re-bootstrap: routing table has "
-                        f"{size} peers (< k={self._k}), re-dialing bootstrap peers"
-                    )
-                    if self._bootstrap_peers:
-                        await self.bootstrap(self._bootstrap_peers)
-                    if self._bootstrap_dns:
-                        await self.bootstrap_from_dns(self._bootstrap_dns, self._bootstrap_dns_port)
-                    if self._bootstrap_hostlist:
-                        await self.bootstrap_from_hostlist(
-                            self._bootstrap_hostlist, self._bootstrap_dns_port
-                        )
-                    if self._mdns:
-                        self._mdns.send_query()
-                elif size > 0:
-                    # Table is healthy: just do a self-lookup to discover
-                    # new nearby peers and refresh routing
-                    log.debug(
-                        f"periodic self-lookup: routing table has {size} peers"
-                    )
-                    await self._iterative_find_node(self.peer_id)
-
-                # Bucket refresh: lookup a random key in each non-empty bucket
-                # to discover peers we wouldn't find through self-lookup alone
-                await self._refresh_buckets()
+                await self._periodic_bootstrap_tick()
         except asyncio.CancelledError:
             pass
+
+    async def _periodic_bootstrap_tick(self) -> None:
+        """One iteration of the periodic-bootstrap loop body.
+
+        Prunes the routing table, then either re-dials bootstrap peers
+        (sparse table) or runs a self-lookup (healthy table), then
+        refreshes buckets. Extracted from the loop body so unit tests
+        can drive a single cycle without faking ``asyncio.sleep``.
+
+        Inspection API: tests in this repository call this directly to
+        assert prune-before-size ordering and bootstrap-decision logic.
+        Production code should not call this except via the loop.
+        """
+        # Prune disconnected peers before sampling table size so the
+        # sparse-table check reflects actual reachable peers. Reading
+        # size first would race against the prune and skip the
+        # recovery cycle when pruning drops us below k.
+        self._quick_prune()
+        size = self.routing_table.size()
+
+        if size < self._k:
+            # Sparse table: re-dial bootstrap peers first
+            log.info(
+                f"periodic re-bootstrap: routing table has "
+                f"{size} peers (< k={self._k}), re-dialing bootstrap peers"
+            )
+            if self._bootstrap_peers:
+                await self.bootstrap(self._bootstrap_peers)
+            if self._bootstrap_dns:
+                await self.bootstrap_from_dns(self._bootstrap_dns, self._bootstrap_dns_port)
+            if self._bootstrap_hostlist:
+                await self.bootstrap_from_hostlist(
+                    self._bootstrap_hostlist, self._bootstrap_dns_port
+                )
+            if self._mdns:
+                self._mdns.send_query()
+        elif size > 0:
+            # Table is healthy: just do a self-lookup to discover
+            # new nearby peers and refresh routing
+            log.debug(
+                f"periodic self-lookup: routing table has {size} peers"
+            )
+            await self._iterative_find_node(self.peer_id)
+
+        # Bucket refresh: lookup a random key in each non-empty bucket
+        # to discover peers we wouldn't find through self-lookup alone
+        await self._refresh_buckets()
 
     async def _refresh_buckets(self) -> None:
         """Refresh routing table buckets by looking up a random key in each.

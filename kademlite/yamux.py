@@ -216,6 +216,17 @@ class YamuxStream:
             await self.session._send_frame(TYPE_DATA, FLAG_FIN, self.stream_id, b"")
             self._closed = True
 
+    @property
+    def is_closed(self) -> bool:
+        """True if this stream has been locally closed (FIN sent) or RST'd.
+
+        Inspection API for tests and observability. Note that closed streams
+        may still be present in the session's ``_streams`` dict until the
+        session does its own cleanup; check this property rather than dict
+        membership to determine logical liveness.
+        """
+        return self._closed
+
 
 class YamuxSession:
     """Yamux multiplexer session.
@@ -249,6 +260,27 @@ class YamuxSession:
     def is_alive(self) -> bool:
         """Check if the session's read loop is still running."""
         return self._run_task is not None and not self._run_task.done()
+
+    @property
+    def live_streams_count(self) -> int:
+        """Number of streams currently live (not locally closed).
+
+        Inspection API for tests and observability. Counts only streams
+        where ``stream.is_closed`` is False, since closed streams may
+        remain in ``_streams`` until session-side cleanup. Use this
+        property to assert resource release after a failed RPC or
+        handshake path.
+        """
+        return sum(1 for s in self._streams.values() if not s.is_closed)
+
+    @property
+    def live_stream_ids(self) -> list[int]:
+        """Sorted list of stream IDs that are currently live.
+
+        Inspection API for debugging assertion failures - tells you
+        WHICH streams leaked, not just how many.
+        """
+        return sorted(sid for sid, s in self._streams.items() if not s.is_closed)
 
     async def stop(self) -> None:
         """Stop the session gracefully.
