@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kademlite"
-version = "0.1.1"
+version = "0.2.0"
 description = "Lightweight asyncio-native pure-Python Kademlia DHT implementation"
 authors = [{name = "Nicolas Noble", email = "nicolas@nobis-crew.org"}]
 license = "MIT OR Apache-2.0"
