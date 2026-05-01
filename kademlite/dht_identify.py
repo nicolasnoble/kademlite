@@ -118,6 +118,7 @@ class IdentifyMixin:
             return
         log.info(f"pushing updated identify to {len(peers)} connected peer(s)")
         for peer_id, conn in peers:
+            stream = None
             try:
                 stream, reader, writer = await asyncio.wait_for(
                     conn.open_stream(IDENTIFY_PUSH_PROTOCOL), timeout=5.0
@@ -130,9 +131,17 @@ class IdentifyMixin:
                 )
                 _write_length_prefixed(writer, msg)
                 await writer.drain()
-                await stream.close()
             except Exception as e:
                 log.debug(f"identify push to {peer_id.hex()[:16]}... failed: {e}")
+            finally:
+                if stream is not None:
+                    try:
+                        await stream.close()
+                    except Exception as e:
+                        log.debug(
+                            f"identify push stream close to "
+                            f"{peer_id.hex()[:16]}... raised: {e}"
+                        )
 
     async def _perform_identify(self, conn: Connection) -> list[bytes]:
         """Open an outbound Identify stream and learn the remote peer's listen addrs.
