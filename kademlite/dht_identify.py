@@ -67,9 +67,13 @@ class IdentifyMixin:
             )
             _write_length_prefixed(writer, msg)
             await writer.drain()
-            await stream.close()
         except Exception as e:
             log.warning(f"identify handler error: {e}")
+        finally:
+            try:
+                await stream.close()
+            except Exception as close_err:
+                log.debug(f"identify response stream close raised: {close_err}")
 
     def _setup_identify_push_handler(self, conn: Connection) -> None:
         """Register the Identify Push protocol handler on a connection."""
@@ -110,6 +114,13 @@ class IdentifyMixin:
                 self.peer_store.replace_addrs(conn.remote_peer_id, routable)
         except Exception as e:
             log.debug(f"identify push handler error: {e}")
+        finally:
+            try:
+                await stream.close()
+            except Exception as close_err:
+                log.debug(
+                    f"inbound identify push stream close raised: {close_err}"
+                )
 
     async def _push_identify_to_all(self) -> None:
         """Push our updated Identify message to all connected peers (fire-and-forget)."""
