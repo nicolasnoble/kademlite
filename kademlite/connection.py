@@ -97,10 +97,26 @@ class Connection:
     async def open_stream(
         self, protocol_id: str
     ) -> tuple[YamuxStream, asyncio.StreamReader, asyncio.StreamWriter]:
-        """Open a new outbound stream and negotiate the given protocol."""
+        """Open a new outbound stream and negotiate the given protocol.
+
+        If multistream-select negotiation fails or is cancelled after the
+        YamuxStream has been opened, close the stream before propagating
+        so a half-opened stream doesn't leak on the connection. The
+        caller never sees the stream object on a failed negotiation, so
+        only this method can clean it up.
+        """
         stream = await self.yamux.open_stream()
-        reader, writer = _stream_to_rw(stream)
-        await negotiate_outbound(reader, writer, protocol_id)
+        try:
+            reader, writer = _stream_to_rw(stream)
+            await negotiate_outbound(reader, writer, protocol_id)
+        except BaseException:
+            try:
+                await stream.close()
+            except Exception as close_err:
+                log.debug(
+                    f"stream close after negotiation failure raised: {close_err}"
+                )
+            raise
         return stream, reader, writer
 
     @property
