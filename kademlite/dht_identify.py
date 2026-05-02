@@ -44,7 +44,12 @@ class IdentifyMixin:
         try:
             while True:
                 stream, reader, writer = await queue.get()
-                asyncio.create_task(self._handle_identify_stream(conn, stream, reader, writer))
+                # Track per-stream handler task so DhtNode.stop() cancels
+                # it via _dispatch_tasks rather than leaving it to outlive
+                # the connection teardown.
+                self._track_task(
+                    asyncio.create_task(self._handle_identify_stream(conn, stream, reader, writer))
+                )
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -84,7 +89,12 @@ class IdentifyMixin:
         try:
             while True:
                 stream, reader, writer = await queue.get()
-                asyncio.create_task(self._handle_identify_push_stream(conn, stream, reader, writer))
+                # Track per-stream handler task (see _dispatch_identify_streams).
+                self._track_task(
+                    asyncio.create_task(
+                        self._handle_identify_push_stream(conn, stream, reader, writer)
+                    )
+                )
         except asyncio.CancelledError:
             pass
         except Exception as e:

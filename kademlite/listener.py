@@ -90,6 +90,8 @@ class Listener:
             return
 
         self._active_connections += 1
+        accept_succeeded = False
+        conn: Connection | None = None
         try:
             conn = await asyncio.wait_for(
                 accept(
@@ -101,13 +103,60 @@ class Listener:
             log.info(f"accepted connection from {remote}, peer {conn.remote_peer_id.hex()[:16]}...")
             if self.on_connection:
                 await self.on_connection(conn)
+            # Only mark success AFTER on_connection completes - if the
+            # callback raises, the Connection is fully established
+            # (yamux read loop + stream tasks running) but no caller has
+            # taken ownership, so we need to tear it down ourselves
+            # rather than skipping cleanup.
+            accept_succeeded = True
         except asyncio.TimeoutError:
             log.warning(
                 f"handshake timeout from {remote} after {self.handshake_timeout}s"
             )
-            writer.close()
         except Exception as e:
             log.warning(f"failed to accept connection from {remote}: {e}")
-            writer.close()
         finally:
-            self._active_connections -= 1
+            # Cleanup on every non-success path including external
+            # cancellation. ALWAYS decrement _active_connections - if
+            # cancellation lands inside the cleanup awaits, we'd
+            # otherwise leak the listener slot forever.
+            #
+            # Cancellation safety: catch CancelledError per cleanup
+            # step, capture the instance, finish the rest of the
+            # cleanup, and re-raise the original cancellation at the
+            # end so caller-task cancellation propagates with its
+            # original message/context preserved (matches the
+            # _cleanup_partial_handshake pattern in connection.py).
+            cleanup_cancelled: asyncio.CancelledError | None = None
+            try:
+                if not accept_succeeded:
+                    if conn is not None:
+                        # accept() returned but on_connection raised
+                        # (or external cancellation landed there).
+                        # The Connection owns the writer/noise/yamux
+                        # at this point, so close() handles the full
+                        # teardown - calling writer.close() ourselves
+                        # would conflict with Connection's resources.
+                        try:
+                            await conn.close()
+                        except asyncio.CancelledError as exc:
+                            cleanup_cancelled = cleanup_cancelled or exc
+                            log.debug("conn.close cancelled during accept cleanup; continuing")
+                        except Exception as e:
+                            log.debug(f"conn.close during accept cleanup raised: {e}")
+                    else:
+                        # accept() never returned - the writer is still
+                        # ours to close. Best-effort: failures here just
+                        # mean the OS cleans up later.
+                        try:
+                            writer.close()
+                            await writer.wait_closed()
+                        except asyncio.CancelledError as exc:
+                            cleanup_cancelled = cleanup_cancelled or exc
+                            log.debug("writer.wait_closed cancelled during cleanup")
+                        except Exception as e:
+                            log.debug(f"writer.close/wait_closed during cleanup raised: {e}")
+            finally:
+                self._active_connections -= 1
+            if cleanup_cancelled is not None:
+                raise cleanup_cancelled

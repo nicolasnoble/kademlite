@@ -90,9 +90,44 @@ Concretely:
   candidate IP). The observed address feeds the IP voting described
   below.
 
-After all bootstrap dials have run, the node performs one iterative
-`FIND_NODE(self.peer_id)`. That call is what actually populates the
-K-buckets beyond the bootstrap seeds.
+After bootstrap dials have run, the node may perform up to two
+convergence steps before `start()` returns. Both are conditional on
+the routing table being non-empty - if every bootstrap dial failed
+(or the node started without any bootstrap configured) both steps
+are skipped, and convergence happens later: via the maintenance loop
+on its 5-minute cadence, or for mDNS-only nodes via a one-shot
+refresh fired by the first discovered peer.
+
+1. **Self-lookup**: one iterative `FIND_NODE(self.peer_id)`. This
+   populates the K-buckets near the local node by pulling in peers
+   that the bootstrap dials' transitive routing tables know about.
+2. **Per-CPL bucket refresh** (added in v0.3.0, default on): one round
+   of `_refresh_buckets()` that runs an iterative `FIND_NODE` against
+   a randomly chosen target in each non-empty bucket. The original
+   Kademlia paper (Maymounkov & Mazieres 2002) specifies refreshing
+   buckets "farther than the closest neighbor" - kademlite refreshes
+   all non-empty buckets including the closest, which is slightly
+   more work than the paper's join procedure but produces the same
+   correct routing table (the closest bucket is also touched by the
+   self-lookup, so the duplicate work is bounded). rust-libp2p
+   chains its per-bucket walks into the bootstrap QueryId for
+   similar synchronous-readiness behavior. Without this step, a
+   cold consumer that PUTs/GETs immediately after `start()` operates
+   against a routing table populated only by the closest-neighbor
+   bucket plus whatever the self-lookup discovered transitively, so
+   PUTs/GETs against keys in distant buckets fail until the 5-minute
+   maintenance loop fires its own refresh.
+
+Opt out via `DhtNode.start(wait_until_routable=False)` if the per-CPL
+walks add unwanted latency (tests, constrained startups). The
+maintenance loop's periodic refresh still runs on its 5-minute cadence.
+For caller-driven readiness after `start(wait_until_routable=False)`,
+call `await node.wait_until_routable()` before the first PUT/GET. If
+the routing table is still empty when called, this is a no-op rather
+than a hang - so callers waiting for first-peer arrival from mDNS or
+a delayed bootstrap should poll the routing table size or use the
+node's existing peer-arrival hooks instead of relying on
+`wait_until_routable()` to block.
 
 ## Why bounded
 

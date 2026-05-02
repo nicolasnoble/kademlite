@@ -40,10 +40,15 @@ PENDING_ENTRY_TIMEOUT = 60.0  # seconds
 class PeerEntry:
     """A peer in the routing table."""
 
-    __slots__ = ("peer_id", "addrs", "last_seen", "connected")
+    __slots__ = ("peer_id", "kad_id", "addrs", "last_seen", "connected")
 
     def __init__(self, peer_id: bytes, addrs: list[bytes], last_seen: float | None = None):
         self.peer_id = peer_id
+        # Precompute the Kad-keyspace identifier (sha256(peer_id)) once at
+        # construction so distance comparisons in closest_peers / iterative
+        # lookups don't re-hash on every call. peer_id never changes for an
+        # entry's lifetime, so the cache is safe.
+        self.kad_id = kad_key(peer_id)
         self.addrs = addrs
         self.last_seen = last_seen or time.monotonic()
         self.connected: bool = True
@@ -334,7 +339,9 @@ class RoutingTable:
             all_peers = [p for p in all_peers if p.connected]
 
         target_kad = kad_key(target)
-        all_peers.sort(key=lambda p: xor_distance(kad_key(p.peer_id), target_kad))
+        # PeerEntry caches kad_id at construction so the sort key skips the
+        # per-call sha256 of every peer_id; matters at N >> K.
+        all_peers.sort(key=lambda p: xor_distance(p.kad_id, target_kad))
         return all_peers[:count]
 
     def size(self) -> int:
