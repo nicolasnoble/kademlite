@@ -274,6 +274,74 @@ async def test_public_bootstrap_runs_when_bootstrap_sources_configured() -> None
         await node_a.stop()
 
 
+async def test_public_bootstrap_before_start_raises_no_known_peers() -> None:
+    """Calling bootstrap() before start() must surface NoKnownPeersError
+    (the stable empty-state error), not AttributeError. _bootstrap_dns
+    and _bootstrap_dns_port are initialized in __init__ to safe defaults
+    so the has_bootstrap_source check works pre-start."""
+    node = DhtNode()
+    # No start(), no listener, routing table empty, no sources configured.
+    # The has_bootstrap_source check in _bootstrap_now reads
+    # _bootstrap_peers / _bootstrap_dns / _bootstrap_hostlist - all three
+    # need init defaults for this not to AttributeError.
+    with pytest.raises(NoKnownPeersError):
+        await node.bootstrap()
+
+
+# ---------------------------------------------------------------------------
+# bootstrap_interval validation
+# ---------------------------------------------------------------------------
+
+
+async def test_bootstrap_interval_zero_rejected() -> None:
+    """bootstrap_interval=0 would busy-spin in asyncio.sleep. Reject
+    at the boundary with ValueError."""
+    node = DhtNode()
+    with pytest.raises(ValueError):
+        await node.start("127.0.0.1", 0, enable_mdns=False, bootstrap_interval=0)
+
+
+async def test_bootstrap_interval_negative_rejected() -> None:
+    """Negative bootstrap_interval has no sane meaning. Reject with
+    ValueError."""
+    node = DhtNode()
+    with pytest.raises(ValueError):
+        await node.start("127.0.0.1", 0, enable_mdns=False, bootstrap_interval=-1.5)
+
+
+async def test_bootstrap_interval_bool_rejected() -> None:
+    """bool is an int subclass in Python. Both True and False would
+    slip past the None-check; True is technically 1.0 (legal but
+    almost certainly a bug) and False is 0 (would busy-spin). Reject
+    explicitly with TypeError, matching __init__'s k/alpha pattern."""
+    node = DhtNode()
+    with pytest.raises(TypeError):
+        await node.start("127.0.0.1", 0, enable_mdns=False, bootstrap_interval=True)
+    node2 = DhtNode()
+    with pytest.raises(TypeError):
+        await node2.start("127.0.0.1", 0, enable_mdns=False, bootstrap_interval=False)
+
+
+async def test_bootstrap_interval_non_numeric_rejected() -> None:
+    """A string or other non-numeric value must raise TypeError, not
+    fall through to asyncio.sleep where it would crash with a less
+    helpful TypeError from the sleep call itself."""
+    node = DhtNode()
+    with pytest.raises(TypeError):
+        await node.start("127.0.0.1", 0, enable_mdns=False, bootstrap_interval="60")  # type: ignore[arg-type]
+
+
+async def test_bootstrap_interval_int_accepted() -> None:
+    """Plain int (not bool) is a valid duration in seconds. The
+    boundary check accepts both int and float; only bool is rejected."""
+    node = DhtNode()
+    await node.start("127.0.0.1", 0, enable_mdns=False, bootstrap_interval=30)
+    try:
+        assert node._bootstrap_interval == 30
+    finally:
+        await node.stop()
+
+
 async def test_public_bootstrap_with_peers_preserves_dial_behavior() -> None:
     """Back-compat: node.bootstrap([addrs]) still dials those peers
     and adds them to the routing table. The kademlite-original call

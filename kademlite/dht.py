@@ -134,6 +134,13 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
         self._dispatch_tasks: set[asyncio.Task] = set()
         self._originated_records: dict[bytes, bytes] = {}  # key -> value (records WE originated)
         self._bootstrap_peers: list[str] = []
+        # DNS / SLURM bootstrap fields are set by start(); initialize
+        # here to safe defaults so the no-arg bootstrap() trigger and
+        # _periodic_bootstrap_tick can be called before start() without
+        # AttributeError. A pre-start bootstrap() with no sources still
+        # raises NoKnownPeersError as designed; the fields just exist.
+        self._bootstrap_dns: str | None = None
+        self._bootstrap_dns_port: int = 4001
         self._bootstrap_hostlist: str | None = None
         # Cadence for the periodic bootstrap loop. Set by start();
         # initialized here to the module default so attribute access
@@ -253,6 +260,25 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
                 lifetime of this run; restart the node with a different
                 value to change it.
         """
+        # Validate bootstrap_interval before storing. asyncio.sleep
+        # crashes on non-numeric values and busy-spins on 0/negative,
+        # and bool is an int subclass so False would silently fall
+        # through the None-check and hit the <= 0 path. Reject all of
+        # those at the boundary with the same shape as __init__'s
+        # k/alpha validation.
+        if bootstrap_interval is not None:
+            if isinstance(bootstrap_interval, bool) or not isinstance(
+                bootstrap_interval, (int, float)
+            ):
+                raise TypeError(
+                    f"bootstrap_interval must be float, int, or None, "
+                    f"got {type(bootstrap_interval).__name__}"
+                )
+            if bootstrap_interval <= 0:
+                raise ValueError(
+                    f"bootstrap_interval must be > 0 or None, got {bootstrap_interval}"
+                )
+
         # Reset run-scoped mDNS refresh gate so a stop/start cycle on
         # the same DhtNode instance re-fires the one-shot refresh on
         # its next first-mDNS-peer.
