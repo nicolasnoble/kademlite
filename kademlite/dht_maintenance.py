@@ -13,7 +13,10 @@ import os
 
 log = logging.getLogger(__name__)
 
-# Periodic bootstrap interval: 5 minutes (matches rust-libp2p)
+# Default periodic bootstrap interval: 5 minutes (matches rust-libp2p).
+# Used as the default value of DhtNode.start(bootstrap_interval=...);
+# pass a different float to override per-node, or None to disable the
+# periodic loop entirely.
 BOOTSTRAP_INTERVAL = 5 * 60
 # Replication happens every N republish cycles (~4 hours at default interval)
 REPLICATION_CYCLE_INTERVAL = 4
@@ -54,10 +57,19 @@ class MaintenanceMixin:
         not gated on routing table size. The actual work of one cycle is in
         ``_periodic_bootstrap_tick`` so tests can drive it deterministically
         without monkey-patching ``asyncio.sleep``.
+
+        The cadence is read from ``self._bootstrap_interval`` once per
+        iteration so a node configured with ``bootstrap_interval=None``
+        does nothing (the loop exits immediately on entry). The interval
+        is otherwise treated as immutable for the lifetime of the loop:
+        runtime mutation is intentionally not supported (matches
+        libp2p-kad, which only exposes the cadence at construction).
         """
+        if self._bootstrap_interval is None:
+            return
         try:
             while True:
-                await asyncio.sleep(BOOTSTRAP_INTERVAL)
+                await asyncio.sleep(self._bootstrap_interval)
                 await self._periodic_bootstrap_tick()
         except asyncio.CancelledError:
             pass

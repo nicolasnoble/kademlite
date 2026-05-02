@@ -24,10 +24,72 @@ from .slurm import expand_hostlist
 log = logging.getLogger(__name__)
 
 
+class NoKnownPeersError(RuntimeError):
+    """Raised by ``DhtNode.bootstrap()`` (no-arg form) when there is
+    nothing to bootstrap against: the routing table is empty AND no
+    bootstrap sources (explicit peers, DNS hostname, SLURM hostlist)
+    are configured. Mirrors libp2p-kad's ``NoKnownPeers`` error type
+    (see rust ``libp2p_kad::behaviour::NoKnownPeers``)."""
+
+
 class BootstrapMixin:
     """Bootstrap providers for DhtNode."""
 
-    async def bootstrap(self, peers: list[str]) -> None:
+    async def bootstrap(self, peers: list[str] | None = None) -> None:
+        """Trigger a bootstrap cycle.
+
+        Two call shapes are supported:
+
+        - ``await node.bootstrap()`` (no args) runs one on-demand
+          bootstrap cycle equivalent to a single periodic-bootstrap
+          tick: prune dead peers, re-dial the configured bootstrap
+          sources when the routing table is below ``k``, otherwise
+          self-lookup, then refresh per-CPL buckets. Mirrors
+          rust-libp2p ``Behaviour::bootstrap``. If the routing table
+          is empty AND no bootstrap sources are configured, raises
+          :class:`NoKnownPeersError` (matching libp2p-kad's
+          ``NoKnownPeers``).
+        - ``await node.bootstrap(peers)`` with an explicit list of
+          peer multiaddrs dials those peers, adds them to the routing
+          table, performs an Identify exchange, and runs a self-lookup.
+          This is the original kademlite ``bootstrap`` shape and stays
+          available for callers that want to add seed peers without
+          going through ``DhtNode.start``.
+
+        The two shapes never both run in one call: when ``peers`` is
+        ``None`` (or omitted) the on-demand-tick path runs; when
+        ``peers`` is a (possibly empty) list, the dial-peers path runs.
+        """
+        if peers is None:
+            await self._bootstrap_now()
+            return
+        await self._bootstrap_dial_peers(peers)
+
+    async def _bootstrap_now(self) -> None:
+        """One on-demand bootstrap cycle (libp2p-kad shape).
+
+        Equivalent to one ``_periodic_bootstrap_tick`` body, plus an
+        empty-state guard that raises :class:`NoKnownPeersError` when
+        there is nothing to bootstrap against.
+        """
+        # Guard: matches libp2p-kad's NoKnownPeers semantic. If we have
+        # neither a populated routing table nor any configured bootstrap
+        # source to fall back on, the caller's request to bootstrap is
+        # unfulfillable; surface that explicitly rather than running a
+        # silent no-op tick.
+        has_bootstrap_source = bool(
+            self._bootstrap_peers
+            or self._bootstrap_dns
+            or self._bootstrap_hostlist
+        )
+        if self.routing_table.size() == 0 and not has_bootstrap_source:
+            raise NoKnownPeersError(
+                "cannot bootstrap: routing table is empty and no bootstrap "
+                "sources (peers, DNS, SLURM hostlist) are configured"
+            )
+        await self._periodic_bootstrap_tick()
+
+    async def _bootstrap_dial_peers(self, peers: list[str]) -> None:
         """Connect to bootstrap peers and perform a self-lookup to populate the routing table."""
         for addr_str in peers:
             try:

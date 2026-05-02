@@ -22,7 +22,7 @@ from .connection import IDENTIFY_PROTOCOL, IDENTIFY_PUSH_PROTOCOL, Connection
 from .crypto import Ed25519Identity
 from .dht_bootstrap import BootstrapMixin
 from .dht_identify import IdentifyMixin
-from .dht_maintenance import MaintenanceMixin
+from .dht_maintenance import BOOTSTRAP_INTERVAL, MaintenanceMixin
 from .dht_queries import QueryMixin
 from .dht_utils import _filter_routable_addrs, _log_task_exception
 from .kad_handler import KadHandler
@@ -135,6 +135,12 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
         self._originated_records: dict[bytes, bytes] = {}  # key -> value (records WE originated)
         self._bootstrap_peers: list[str] = []
         self._bootstrap_hostlist: str | None = None
+        # Cadence for the periodic bootstrap loop. Set by start();
+        # initialized here to the module default so attribute access
+        # before start() (e.g. from _periodic_bootstrap_loop in a unit
+        # test that bypasses start()) returns a sane value. None
+        # disables the loop entirely.
+        self._bootstrap_interval: float | None = BOOTSTRAP_INTERVAL
         self._mdns: MdnsDiscovery | None = None
         # mDNS-only nodes start with an empty routing table so the
         # bootstrap-time wait_until_routable refresh skips. Track
@@ -205,6 +211,7 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
         bootstrap_slurm: str | None = None,
         enable_mdns: bool | None = None,
         wait_until_routable: bool = True,
+        bootstrap_interval: float | None = BOOTSTRAP_INTERVAL,
     ) -> None:
         """Start the DHT node.
 
@@ -235,6 +242,16 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
                 neighborhood. Set False to skip the per-bucket walks (for
                 tests or constrained startups where the maintenance loop's
                 periodic refresh is acceptable).
+            bootstrap_interval: cadence in seconds for the periodic
+                bootstrap loop. Defaults to ``BOOTSTRAP_INTERVAL``
+                (5 minutes). Pass a smaller value for tighter cadences
+                (e.g. cold-start convergence on large fleets) or ``None``
+                to disable the periodic loop entirely. Mirrors
+                rust-libp2p's ``Config::set_periodic_bootstrap_interval``
+                with its ``Option<Duration>`` semantics where ``None``
+                disables the timer. The interval applies for the
+                lifetime of this run; restart the node with a different
+                value to change it.
         """
         # Reset run-scoped mDNS refresh gate so a stop/start cycle on
         # the same DhtNode instance re-fires the one-shot refresh on
@@ -245,6 +262,7 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
         self._bootstrap_peers = bootstrap_peers or []
         self._bootstrap_dns = bootstrap_dns
         self._bootstrap_dns_port = bootstrap_dns_port
+        self._bootstrap_interval = bootstrap_interval
 
         # SLURM hostlist: explicit param or auto-detect from env
         if bootstrap_slurm is None:
@@ -287,9 +305,12 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
         if wait_until_routable and has_bootstrap and self.routing_table.size() > 0:
             await self._refresh_buckets()
 
-        # Start background loops
+        # Start background loops. The periodic bootstrap loop is gated
+        # on bootstrap_interval being non-None: passing
+        # ``bootstrap_interval=None`` disables the loop entirely so no
+        # task is spawned (libp2p-kad's Option<Duration> semantics).
         self._republish_task = asyncio.create_task(self._republish_loop())
-        if has_bootstrap:
+        if has_bootstrap and self._bootstrap_interval is not None:
             self._bootstrap_task = asyncio.create_task(self._periodic_bootstrap_loop())
 
         # mDNS discovery: auto-enable when no explicit bootstrap is configured
@@ -304,8 +325,9 @@ class DhtNode(IdentifyMixin, QueryMixin, BootstrapMixin, MaintenanceMixin):
                 on_peer_discovered=self._on_mdns_peer,
             )
             await self._mdns.start()
-            # Also start periodic bootstrap loop for mDNS (to re-query on sparse table)
-            if not self._bootstrap_task:
+            # Also start periodic bootstrap loop for mDNS (to re-query on sparse table).
+            # Same interval gate as above: bootstrap_interval=None disables the loop.
+            if not self._bootstrap_task and self._bootstrap_interval is not None:
                 self._bootstrap_task = asyncio.create_task(self._periodic_bootstrap_loop())
 
     async def wait_until_routable(self) -> None:
