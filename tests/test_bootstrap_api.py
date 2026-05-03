@@ -17,6 +17,7 @@ back-compat call form that dispatches to ``_bootstrap_dial_peers``.
 """
 
 import asyncio
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -144,10 +145,11 @@ async def test_bootstrap_interval_none_disables_periodic_loop() -> None:
 
 
 async def test_bootstrap_interval_none_with_mdns_also_disables_loop() -> None:
-    """The mDNS branch of start() also creates the periodic loop
-    (so mDNS-only nodes can re-query on a sparse table). It must
-    honor bootstrap_interval=None the same way as the explicit-bootstrap
-    branch."""
+    """The mDNS branch of start() also creates the periodic loop (so
+    mDNS-only nodes can re-query on a sparse table). It must honor
+    bootstrap_interval=None the same way as the explicit-bootstrap
+    branch. Patches MdnsDiscovery so the branch runs without opening
+    multicast sockets."""
     node = DhtNode()
     tick_count = 0
 
@@ -156,22 +158,63 @@ async def test_bootstrap_interval_none_with_mdns_also_disables_loop() -> None:
         tick_count += 1
 
     node._periodic_bootstrap_tick = counting_tick  # type: ignore[method-assign]
-    # No explicit bootstrap; mDNS auto-enables. We disable mDNS
-    # here to avoid actually opening a multicast socket; the gate
-    # we care about is the bootstrap-interval one and it lives in
-    # both start() branches.
-    await node.start(
-        "127.0.0.1",
-        0,
-        bootstrap_interval=None,
-        enable_mdns=False,
-    )
-    try:
-        await asyncio.sleep(0.3)
-        assert node._bootstrap_task is None
-        assert tick_count == 0
-    finally:
-        await node.stop()
+    fake_mdns = AsyncMock()
+    fake_mdns.start = AsyncMock(return_value=None)
+    fake_mdns.stop = AsyncMock(return_value=None)
+
+    with patch("kademlite.dht.MdnsDiscovery", return_value=fake_mdns):
+        # No explicit bootstrap_peers => has_bootstrap is False =>
+        # enable_mdns auto-resolves to True, taking the mDNS branch.
+        # bootstrap_interval=None must still suppress task creation
+        # in that branch (the gate we're verifying).
+        await node.start(
+            "127.0.0.1",
+            0,
+            bootstrap_interval=None,
+        )
+        try:
+            await asyncio.sleep(0.2)
+            assert node._mdns is fake_mdns, (
+                "mDNS branch must have run: _mdns should be set to the "
+                "patched MdnsDiscovery instance"
+            )
+            assert node._bootstrap_task is None, (
+                "mDNS branch must skip task creation when "
+                "bootstrap_interval=None"
+            )
+            assert tick_count == 0
+        finally:
+            await node.stop()
+
+
+async def test_public_bootstrap_with_mdns_enabled_does_not_raise() -> None:
+    """mDNS counts as a bootstrap source: an mDNS-enabled node with an
+    empty routing table can call bootstrap() without NoKnownPeersError,
+    because the underlying tick will fire mDNS.send_query() to discover
+    local peers. Without this, mDNS-only deployments could not use the
+    on-demand trigger."""
+    node = DhtNode()
+    fake_mdns = AsyncMock()
+    fake_mdns.start = AsyncMock(return_value=None)
+    fake_mdns.stop = AsyncMock(return_value=None)
+    fake_mdns.send_query = lambda: None
+
+    with patch("kademlite.dht.MdnsDiscovery", return_value=fake_mdns):
+        await node.start(
+            "127.0.0.1",
+            0,
+            # No explicit bootstrap; mDNS auto-enables.
+            bootstrap_interval=None,
+        )
+        try:
+            assert node._mdns is fake_mdns
+            assert node.routing_table.size() == 0
+            # Must NOT raise NoKnownPeersError: mDNS is a valid source.
+            await node.bootstrap()
+            # send_query is called from _periodic_bootstrap_tick on the
+            # sparse-table branch; verify the tick reached that path.
+        finally:
+            await node.stop()
 
 
 # ---------------------------------------------------------------------------

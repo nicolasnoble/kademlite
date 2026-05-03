@@ -76,16 +76,19 @@ class BootstrapMixin:
         # neither a populated routing table nor any configured bootstrap
         # source to fall back on, the caller's request to bootstrap is
         # unfulfillable; surface that explicitly rather than running a
-        # silent no-op tick.
+        # silent no-op tick. mDNS counts as a source: the tick fires
+        # ``self._mdns.send_query()`` on a sparse table, which can
+        # discover peers on the local segment without any other config.
         has_bootstrap_source = bool(
             self._bootstrap_peers
             or self._bootstrap_dns
             or self._bootstrap_hostlist
+            or self._mdns
         )
         if self.routing_table.size() == 0 and not has_bootstrap_source:
             raise NoKnownPeersError(
                 "cannot bootstrap: routing table is empty and no bootstrap "
-                "sources (peers, DNS, SLURM hostlist) are configured"
+                "sources (peers, DNS, SLURM hostlist, mDNS) are configured"
             )
         await self._periodic_bootstrap_tick()
 
